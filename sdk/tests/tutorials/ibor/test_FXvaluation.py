@@ -9,6 +9,7 @@ from utilities import InstrumentLoader
 from utilities import TestDataUtilities
 import json
 
+
 class Valuation(unittest.TestCase):
 
     @classmethod
