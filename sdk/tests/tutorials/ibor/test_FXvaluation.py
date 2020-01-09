@@ -134,11 +134,8 @@ class Valuation(unittest.TestCase):
         end_date = datetime(2024, 11, 21, tzinfo=pytz.utc)
         dom_amount = 100000000
         fgn_amount = -133650000
+        start_FX_price = 1.289
         optionMatDate = end_date = datetime(2020, 5, 21, tzinfo=pytz.utc)
-
-
-
-
         # start_date = datetime(2019, 11, 21, tzinfo=pytz.utc)
         # end_date = datetime(2019, 11, 22, tzinfo=pytz.utc)
         # dom_amount = 1000
@@ -146,6 +143,30 @@ class Valuation(unittest.TestCase):
 
         scope = "TRRiskDomain"
         portfolio = "FXFwd1GBP"
+
+        # Create a quote for the FX GBP/USD for 21/11/19
+        FX_quote = models.UpsertQuoteRequest(
+            quote_id=models.QuoteId(
+                quote_series_id=models.QuoteSeriesId(
+                    provider='Lusid',
+                    instrument_id="GBP/USD",
+                    instrument_id_type='CurrencyPair',
+                    quote_type='Price',
+                    field='mid'),
+                effective_at=start_date,
+            ),
+            metric_value=models.MetricValue(
+                value=start_FX_price,
+                unit='rate'),
+            lineage='InternalSystem')
+
+        # Call LUSID to upsert the quote
+        response = self.quotes_api.upsert_quotes(
+            scope=scope,
+            quotes={"1":FX_quote})
+
+
+
 
         instrument_definition1 = models.FxForwardInstrument(
             dom_amount=dom_amount,
@@ -359,5 +380,238 @@ class Valuation(unittest.TestCase):
 
         print(response)
 
+
+        self.assertEqual(response.data[2]["Sum(Holding/default/PV)"], 30000)
+
+    ################################################
+    def test_FXFWD_aggregation_inline_weighted(self):
+        #price a simple fx fwd..demomonstrate sensible value.
+        #can update dates etc (perhaps run as spot for 5y?
+        trade_date = datetime(2019, 11, 19, tzinfo=pytz.utc)    #change to today?
+        start_date = datetime(2019, 11, 21, tzinfo=pytz.utc)    #change to spot?
+        end_date3y = datetime(2022, 11, 21, tzinfo=pytz.utc)    #3yr
+        end_date5y = datetime(2024, 11, 21, tzinfo=pytz.utc)    #5yr
+        end_date10y = datetime(2029, 11, 21, tzinfo=pytz.utc)    #10yr
+
+        dom_amount = 100000000
+        fgn_amount = -133650000                                 #Use mkt fwd to generate close to 0 PV? or use 5y and have over and under
+        start_FX_price = 1.2915
+
+        scope = "TRRiskDomain"
+
+        # Create a quote for the FX GBP/USD for 21/11/19
+        FX_quote = models.UpsertQuoteRequest(
+            quote_id=models.QuoteId(
+                quote_series_id=models.QuoteSeriesId(
+                    provider='Lusid',
+                    instrument_id="GBP/USD",
+                    instrument_id_type='CurrencyPair',
+                    quote_type='Price',
+                    field='mid'),
+                effective_at=start_date,
+            ),
+            metric_value=models.MetricValue(
+                value=start_FX_price,
+                unit='rate'),
+            lineage='InternalSystem')
+
+        # Call LUSID to upsert the quote
+        response = self.quotes_api.upsert_quotes(
+            scope=scope,
+            quotes={"1": FX_quote})
+
+        instrument_definition3y = models.FxForwardInstrument(
+            dom_amount=dom_amount,
+            fgn_amount=-fgn_amount,
+            is_ndf=False,
+            fixing_date=trade_date.isoformat(),
+            fgn_ccy="USD",
+            ref_spot_rate=start_FX_price,
+            start_date=start_date.isoformat(),
+            maturity_date=end_date3y.isoformat(),
+            dom_ccy="GBP",
+            instrument_type="FxForward")
+
+        instrument_definition5y = models.FxForwardInstrument(
+            dom_amount=dom_amount,
+            fgn_amount=-fgn_amount,
+            is_ndf=False,
+            fixing_date=trade_date.isoformat(),
+            fgn_ccy="USD",
+            ref_spot_rate=start_FX_price,
+            start_date=start_date.isoformat(),
+            maturity_date=end_date5y.isoformat(),
+            dom_ccy="GBP",
+            instrument_type="FxForward")
+
+        instrument_definition10y = models.FxForwardInstrument(
+            dom_amount=dom_amount,
+            fgn_amount=-fgn_amount,
+            is_ndf=False,
+            fixing_date=trade_date.isoformat(),
+            fgn_ccy="USD",
+            ref_spot_rate=start_FX_price,
+            start_date=start_date.isoformat(),
+            maturity_date=end_date10y.isoformat(),
+            dom_ccy="GBP",
+            instrument_type="FxForward")
+
+        print(response)
+
+        vendorModel = models.VendorModelRule(supplier="VolMaster", model_name="VendorDefault",
+                                             instrument_type="FxOption", parameters="{}")
+        pricingContext = models.PricingContext(model_rules=[vendorModel])
+        RecipeId = models.ConfigurationRecipe(code="volmaster", pricing=pricingContext)
+
+        weightedInstrumentFXFwd3y = models.WeightedInstrument(quantity=1, holding_identifier="myholding",
+                                                            instrument=instrument_definition3y)
+
+        weightedInstrumentFXFwd5y = models.WeightedInstrument(quantity=1, holding_identifier="myholding",
+                                                              instrument=instrument_definition5y)
+
+        weightedInstrumentFXFwd10y = models.WeightedInstrument(quantity=1, holding_identifier="myholding",
+                                                              instrument=instrument_definition10y)
+
+        weightedInstrumentList = [weightedInstrumentFXFwd3y, weightedInstrumentFXFwd5y, weightedInstrumentFXFwd10y]
+
+        aggregationRequestResource = models.AggregationRequest(
+            # recipe_id=ResourceId,
+            inline_recipe=RecipeId,
+            effective_at=start_date.isoformat(),
+            metrics=[
+                models.AggregateSpec(key='Analytic/default/ValuationDate',
+                                     op='Value'),
+                models.AggregateSpec(key='Holding/default/PV',
+                                     op='Value')
+            ]
+        )
+        inlineRequestFXFwd = models.InlineAggregationRequest(request=aggregationRequestResource,
+                                                             instruments=weightedInstrumentList)
+
+        # Call LUSID to perform the aggregation
+
+        response = self.aggregation_api.get_aggregation_of_weighted_instruments(scope,
+                                                                                inline_request=inlineRequestFXFwd)
+        print(response.data[0])
+        print(response)
+
+        print(response)
+
+        self.assertEqual(response.data[2]["Sum(Holding/default/PV)"], 30000)
+
+
+    ####################################################
+    def test_FXOPT_aggregation_inline_weighted(self):
+        #price a simple fx fwd..demomonstrate sensible value.
+        #can update dates etc (perhaps run as spot for 5y?
+        trade_date = datetime(2019, 11, 19, tzinfo=pytz.utc)    #change to today?
+        start_date = datetime(2019, 11, 21, tzinfo=pytz.utc)    #change to spot?
+        end_date3y = datetime(2022, 11, 21, tzinfo=pytz.utc)    #3yr
+        end_date5y = datetime(2024, 11, 21, tzinfo=pytz.utc)    #5yr
+        end_date10y = datetime(2029, 11, 21, tzinfo=pytz.utc)    #10yr
+
+        dom_amount = 100000000
+        fgn_amount = -133650000                                 #Use mkt fwd to generate close to 0 PV? or use 5y and have over and under
+        start_FX_price = 1.2915
+
+        scope = "TRRiskDomain"
+
+        # Create a quote for the FX GBP/USD for 21/11/19
+        FX_quote = models.UpsertQuoteRequest(
+            quote_id=models.QuoteId(
+                quote_series_id=models.QuoteSeriesId(
+                    provider='Lusid',
+                    instrument_id="GBP/USD",
+                    instrument_id_type='CurrencyPair',
+                    quote_type='Price',
+                    field='mid'),
+                effective_at=start_date,
+            ),
+            metric_value=models.MetricValue(
+                value=start_FX_price,
+                unit='rate'),
+            lineage='InternalSystem')
+
+        # Call LUSID to upsert the quote
+        response = self.quotes_api.upsert_quotes(
+            scope=scope,
+            quotes={"1": FX_quote})
+
+        instrument_definition3y = models.FxForwardInstrument(
+            dom_amount=dom_amount,
+            fgn_amount=-fgn_amount,
+            is_ndf=False,
+            fixing_date=trade_date.isoformat(),
+            fgn_ccy="USD",
+            ref_spot_rate=start_FX_price,
+            start_date=start_date.isoformat(),
+            maturity_date=end_date3y.isoformat(),
+            dom_ccy="GBP",
+            instrument_type="FxForward")
+
+        instrument_definition5y = models.FxForwardInstrument(
+            dom_amount=dom_amount,
+            fgn_amount=-fgn_amount,
+            is_ndf=False,
+            fixing_date=trade_date.isoformat(),
+            fgn_ccy="USD",
+            ref_spot_rate=start_FX_price,
+            start_date=start_date.isoformat(),
+            maturity_date=end_date5y.isoformat(),
+            dom_ccy="GBP",
+            instrument_type="FxForward")
+
+        instrument_definition10y = models.FxForwardInstrument(
+            dom_amount=dom_amount,
+            fgn_amount=-fgn_amount,
+            is_ndf=False,
+            fixing_date=trade_date.isoformat(),
+            fgn_ccy="USD",
+            ref_spot_rate=start_FX_price,
+            start_date=start_date.isoformat(),
+            maturity_date=end_date10y.isoformat(),
+            dom_ccy="GBP",
+            instrument_type="FxForward")
+
+        print(response)
+
+        vendorModel = models.VendorModelRule(supplier="VolMaster", model_name="VendorDefault",
+                                             instrument_type="FxOption", parameters="{}")
+        pricingContext = models.PricingContext(model_rules=[vendorModel])
+        RecipeId = models.ConfigurationRecipe(code="volmaster", pricing=pricingContext)
+
+        weightedInstrumentFXFwd3y = models.WeightedInstrument(quantity=1, holding_identifier="myholding",
+                                                            instrument=instrument_definition3y)
+
+        weightedInstrumentFXFwd5y = models.WeightedInstrument(quantity=1, holding_identifier="myholding",
+                                                              instrument=instrument_definition5y)
+
+        weightedInstrumentFXFwd10y = models.WeightedInstrument(quantity=1, holding_identifier="myholding",
+                                                              instrument=instrument_definition10y)
+
+        weightedInstrumentList = [weightedInstrumentFXFwd3y, weightedInstrumentFXFwd5y, weightedInstrumentFXFwd10y]
+
+        aggregationRequestResource = models.AggregationRequest(
+            # recipe_id=ResourceId,
+            inline_recipe=RecipeId,
+            effective_at=start_date.isoformat(),
+            metrics=[
+                models.AggregateSpec(key='Analytic/default/ValuationDate',
+                                     op='Value'),
+                models.AggregateSpec(key='Holding/default/PV',
+                                     op='Value')
+            ]
+        )
+        inlineRequestFXFwd = models.InlineAggregationRequest(request=aggregationRequestResource,
+                                                             instruments=weightedInstrumentList)
+
+        # Call LUSID to perform the aggregation
+
+        response = self.aggregation_api.get_aggregation_of_weighted_instruments(scope,
+                                                                                inline_request=inlineRequestFXFwd)
+        print(response.data[0])
+        print(response)
+
+        print(response)
 
         self.assertEqual(response.data[2]["Sum(Holding/default/PV)"], 30000)
