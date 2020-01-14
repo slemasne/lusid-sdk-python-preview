@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<LusidInstrumentSet>
+   <instruments>
+		<instrument type="fra">
+  		  <ccy>USD</ccy>
+		  <startTenor>0M</startTenor>
+		  <fraTenor>3M</fraTenor>
+		  <quote type="rate">0.01</quote>
+		</instrument>
+		<instrument type="fra">
+  		  <ccy>USD</ccy>
+		  <startTenor>3M</startTenor>
+		  <fraTenor>3M</fraTenor>
+		  <quote type="rate">0.01</quote>
+		</instrument>
+		<instrument type="fra">
+  		  <ccy>USD</ccy>
+		  <startTenor>6M</startTenor>
+		  <fraTenor>3M</fraTenor>
+		  <quote type="rate">0.01</quote>
+		</instrument>
+		<instrument type="fra">
+  		  <ccy>USD</ccy>
+		  <startTenor>9M</startTenor>
+		  <fraTenor>3M</fraTenor>
+		  <quote type="rate">0.01</quote>
+		</instrument>	
+   </instruments>
+</LusidInstrumentSet>
