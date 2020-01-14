@@ -8,8 +8,8 @@ import lusid.models as models
 from utilities import InstrumentLoader
 from utilities import TestDataUtilities
 import json
-
-
+#from xml.etree import ElementTree
+import xml.dom.minidom
 class Valuation(unittest.TestCase):
 
     @classmethod
@@ -889,108 +889,23 @@ class Valuation(unittest.TestCase):
 
     def test_delta(self):
 
-
         marketDataScope = "TRRiskDomain"
         marketSupplier = 'Lusid'
 
+        import xml.etree.ElementTree as ET
+        root = ET.parse('Lusid_MktData_Rates_Fra_JPY_20190101.xml')
+        rootString = ET.tostring(root.getroot())
 
-        SMD_JPY_curve = models.StructuredMarketData(
-            {"LusidInstrumentSet": {
-                "instruments": {
-                    "instrument": [
-                        {
-                            "-type": "fra",
-                            "ccy": "JPY",
-                            "startTenor": "0M",
-                            "fraTenor": "3M",
-                            "quote": {
-                                "-type": "rate",
-                                "#text": "0.01"
-                                }
-                            },
-                        {
-                            "-type": "fra",
-                            "ccy": "JPY",
-                            "startTenor": "3M",
-                            "fraTenor": "3M",
-                            "quote": {
-                                "-type": "rate",
-                                "#text": "0.01"
-                                }
-                            },
-                        {
-                            "-type": "fra",
-                            "ccy": "JPY",
-                            "startTenor": "6M",
-                            "fraTenor": "3M",
-                            "quote": {
-                                "-type": "rate",
-                                "#text": "0.01"
-                                }
-                            },
-                        {
-                            "-type": "fra",
-                            "ccy": "JPY",
-                            "startTenor": "9M",
-                            "fraTenor": "3M",
-                            "quote": {
-                                "-type": "rate",
-                                "#text": "0.01"
-                                }
-                            }
-                        ]
-                    }
-                }
-                })
+        JPYtree = xml.dom.minidom.parse('Lusid_MktData_Rates_Fra_JPY_20190101.xml')
+        USDtree = xml.dom.minidom.parse('Lusid_MktData_Rates_Fra_USD_20190101.xml')
+        from pathlib import Path
+        JPYTextTree = Path('Lusid_MktData_Rates_Fra_JPY_20190101.xml').read_text()
+        USDTextTree = Path('Lusid_MktData_Rates_Fra_USD_20190101.xml').read_text()
 
-        SMD_USD_curve = models.StructuredMarketData(
-            {"LusidInstrumentSet": {
-                "instruments": {
-                    "instrument": [
-                        {
-                            "-type": "fra",
-                            "ccy": "USD",
-                            "startTenor": "0M",
-                            "fraTenor": "3M",
-                            "quote": {
-                                "-type": "rate",
-                                "#text": "0.01"
-                            }
-                        },
-                        {
-                            "-type": "fra",
-                            "ccy": "USD",
-                            "startTenor": "3M",
-                            "fraTenor": "3M",
-                            "quote": {
-                                "-type": "rate",
-                                "#text": "0.01"
-                            }
-                        },
-                        {
-                            "-type": "fra",
-                            "ccy": "USD",
-                            "startTenor": "6M",
-                            "fraTenor": "3M",
-                            "quote": {
-                                "-type": "rate",
-                                "#text": "0.01"
-                            }
-                        },
-                        {
-                            "-type": "fra",
-                            "ccy": "USD",
-                            "startTenor": "9M",
-                            "fraTenor": "3M",
-                            "quote": {
-                                "-type": "rate",
-                                "#text": "0.01"
-                            }
-                        }
-                    ]
-                }
-            }
-            })
+
+        SMD_JPY_curve = models.StructuredMarketData(rootString)
+
+        SMD_USD_curve = models.StructuredMarketData(USDTextTree)
 
         SMDquote1 = models.UpsertStructuredMarketDataRequest(
             market_data_id="SMD_id_1",
@@ -1050,13 +965,13 @@ class Valuation(unittest.TestCase):
 
         print(response)
 
-        vendorModel = models.VendorModelRule(supplier="RefinitivQps", model_name="VendorDefault",
+        vendorModel = models.VendorModelRule(supplier="Lusid", model_name="SimpleStatic",
                                              instrument_type="FxForward", parameters="{}")
+
 
         pricingContext = models.PricingContext(model_rules=[vendorModel])
         marketContext = models.MarketContext(
-            options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope))
-
+            options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope),market_rules=[])
         RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext, market=marketContext)
 
         weightedInstrumentFXFwd_6m = models.WeightedInstrument(quantity=1, holding_identifier="myholding6m",
@@ -1080,6 +995,10 @@ class Valuation(unittest.TestCase):
                 models.AggregateSpec(key='Analytic/default/StartDate',
                                      op='Value'),
                 models.AggregateSpec(key='Analytic/default/MaturityDate',
+                                     op='Value'),
+                models.AggregateSpec(key='Holding/default/Delta',
+                                     op='Value'),
+                models.AggregateSpec(key='Holding/default/ParallelDelta',
                                      op='Value')
             ]
         )
