@@ -130,6 +130,8 @@ class Valuation(unittest.TestCase):
 
 
     ################################################
+    #This tests:
+    #
     def test_FX_FWD_aggregation_inline_weighted(self):
         #price simple fx fwds..demonstrate sensible PV.
         #can update dates etc
@@ -274,6 +276,7 @@ class Valuation(unittest.TestCase):
         #can update dates etc
         trade_date = datetime(2019, 11, 19, tzinfo=pytz.utc)    #change to today?
         start_date = datetime(2019, 11, 21, tzinfo=pytz.utc)    #change to spot?
+
         end_date_1y = datetime(2020, 11, 21, tzinfo=pytz.utc)    #1yr
         end_date_2y = datetime(2021, 11, 21, tzinfo=pytz.utc)    #2yr
         end_date_3y = datetime(2022, 11, 21, tzinfo=pytz.utc)    #3yr
@@ -298,7 +301,7 @@ class Valuation(unittest.TestCase):
         FX_quote = models.UpsertQuoteRequest(
             quote_id=models.QuoteId(
                 quote_series_id=models.QuoteSeriesId(
-                    provider='marketSupplier',
+                    provider=marketSupplier,
                     instrument_id="GBP/USD",
                     instrument_id_type='CurrencyPair',
                     quote_type='Price',
@@ -351,13 +354,23 @@ class Valuation(unittest.TestCase):
             instrument_type="FxOption"
             )
 
-
         print(response)
 
-        vendorModel = models.VendorModelRule(supplier="RefinitivQps", model_name="VendorDefault",
+        vendorModelQPS = models.VendorModelRule(supplier="RefinitivQps", model_name="VendorDefault",
                                              instrument_type="FxOption", parameters="{}")
 
-        pricingContext = models.PricingContext(model_rules=[vendorModel])
+        vendorModelTracs = models.VendorModelRule(supplier="RefinitivTracsWeb", model_name="VendorDefault",
+                                             instrument_type="FxOption", parameters="{}")
+
+        vendorModelVM = models.VendorModelRule(supplier="VolMaster", model_name="VendorDefault",
+                                             instrument_type="FxOption", parameters="{}")
+
+        vendorModelLD = models.VendorModelRule(supplier="Lusid", model_name="simpleStatic",
+                                             instrument_type="FxOption", parameters="{}")
+
+        vendorModel = vendorModelVM
+
+        pricingContext = models.PricingContext(model_rules=[vendorModel]) #,options = models.PricingOptions(allow_any_instruments_with_sec_uid_to_price_off_lookup=True)) # for LUSID VM
         marketContext = models.MarketContext(
             options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope))
 
@@ -392,6 +405,12 @@ class Valuation(unittest.TestCase):
                 models.AggregateSpec(key='Analytic/default/FgnCcy',
                                      op='Value'),
                 models.AggregateSpec(key='Analytic/default/StartDate',
+                                     op='Value'),
+                models.AggregateSpec(key='Analytic/default/NextEvent',      #Lusid only
+                                     op='Value'),
+                models.AggregateSpec(key='Analytic/default/NextEventType',      #Lusid only
+                                     op='Value'),
+                models.AggregateSpec(key='Holding/default/Cashflows',       #Lusid only
                                      op='Value')
                 #models.AggregateSpec(key='Analytic/default/MaturityDate',
                 #                     op='Value')
