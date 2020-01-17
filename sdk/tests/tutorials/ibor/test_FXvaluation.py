@@ -440,10 +440,11 @@ class Valuation(unittest.TestCase):
             fgn_amount_2y = -132350000
             fgn_amount_3y = -133900000
             # Use mkt fwd to generate close to 0 PV? or use 5y and have over and under
-            start_FX_price = 1.2975
-            fwd_FX_price_1y = 1.31175
-            fwd_FX_price_2y = 1.3235
-            fwd_FX_price_3y = 1.339
+            start_FX_price = 1.297501
+            fwd_FX_price_1y = 1.311751
+            fwd_FX_price_2y = 1.323501
+            fwd_FX_price_3y = 1.339001
+
             '''
                 The market data scope and supplier refer to (effectively) two fields in the database that describe who 'supplied' the data 
                 and the user 'scope' into which it is put. This *must* match the rule that is used to retrieve it or it simply will not be found. 
@@ -475,8 +476,8 @@ class Valuation(unittest.TestCase):
             instrument_definition_1y = models.FxOption(
                 start_date=start_date.isoformat(),
                 option_maturity_date=end_date_1y.isoformat(),
-                option_settlement_date=start_date.isoformat(),
-                is_delivery_not_cash=False,
+                option_settlement_date=end_date_1y.isoformat(),
+                is_delivery_not_cash=True,
                 is_call_not_put=True,
                 strike=fwd_FX_price_1y,
                 dom_ccy="GBP",
@@ -487,8 +488,8 @@ class Valuation(unittest.TestCase):
             instrument_definition_2y = models.FxOption(
                 start_date=start_date.isoformat(),
                 option_maturity_date=end_date_2y.isoformat(),
-                option_settlement_date=start_date.isoformat(),
-                is_delivery_not_cash=False,
+                option_settlement_date=end_date_2y.isoformat(),
+                is_delivery_not_cash=True,
                 is_call_not_put=True,
                 strike=fwd_FX_price_2y,
                 dom_ccy="GBP",
@@ -499,8 +500,8 @@ class Valuation(unittest.TestCase):
             instrument_definition_3y = models.FxOption(
                 start_date=start_date.isoformat(),
                 option_maturity_date=end_date_3y.isoformat(),
-                option_settlement_date=start_date.isoformat(),
-                is_delivery_not_cash=False,
+                option_settlement_date=end_date_3y.isoformat(),
+                is_delivery_not_cash=True,
                 is_call_not_put=True,
                 strike=fwd_FX_price_3y,
                 dom_ccy="GBP",
@@ -1052,8 +1053,8 @@ class Valuation(unittest.TestCase):
         effectiveAt = start_date
 
         end_date_2m = start_date.replace(month=start_date.month + 2)  # 2m
-        end_date_4m = start_date.replace(year=start_date.month + 4)    # 4m
-        end_date_6m = start_date.replace(year=start_date.month + 6)    # 6m
+        end_date_4m = start_date.replace(month=start_date.month + 4)    # 4m
+        end_date_6m = start_date.replace(month=start_date.month + 6)    # 6m
 
         ccyList=['USD', 'JPY']
 
