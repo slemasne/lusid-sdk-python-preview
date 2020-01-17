@@ -5,11 +5,11 @@ import pytz
 
 import lusid
 import lusid.models as models
-from utilities import InstrumentLoader
 from utilities import TestDataUtilities
 import json
 #from xml.etree import ElementTree
 import xml.dom.minidom
+
 class Valuation(unittest.TestCase):
 
     @classmethod
@@ -22,10 +22,6 @@ class Valuation(unittest.TestCase):
         cls.aggregation_api = lusid.AggregationApi(api_client)
         cls.quotes_api = lusid.QuotesApi(api_client)
         cls.SMD_api = lusid.StructuredMarketDataApi(api_client)
-        instrument_loader = InstrumentLoader(cls.instruments_api)
-        cls.instrument_ids = instrument_loader.load_instruments()
-
-        cls.test_data_utilities = TestDataUtilities(cls.transaction_portfolios_api)
 
     def test_portfolio_aggregation(self):
 
@@ -274,12 +270,12 @@ class Valuation(unittest.TestCase):
     def test_FX_OPT_aggregation_inline_weighted(self):
         #price simple fx opts..demonstrate sensible pvs.
         #can update dates etc
-        trade_date = datetime(2019, 11, 19, tzinfo=pytz.utc)    #change to today?
-        start_date = datetime(2019, 11, 21, tzinfo=pytz.utc)    #change to spot?
+        trade_date = datetime.today().replace(tzinfo=pytz.utc)  # change to today for VolMaster
+        start_date = trade_date  # change to spot?
 
-        end_date_1y = datetime(2020, 11, 21, tzinfo=pytz.utc)    #1yr
-        end_date_2y = datetime(2021, 11, 21, tzinfo=pytz.utc)    #2yr
-        end_date_3y = datetime(2022, 11, 21, tzinfo=pytz.utc)    #3yr
+        end_date_1y = start_date.replace(year=start_date.year + 1)  # 1yr
+        end_date_2y = start_date.replace(year=start_date.year + 2)  # 2yr
+        end_date_3y = start_date.replace(year=start_date.year + 3)  # 3yr
 
         dom_amount = 100000000
         fgn_amount_1y = -131175000
@@ -410,7 +406,7 @@ class Valuation(unittest.TestCase):
                                      op='Value'),
                 models.AggregateSpec(key='Analytic/default/NextEventType',      #Lusid only
                                      op='Value'),
-                models.AggregateSpec(key='Holding/default/Cashflows',       #Lusid only
+                models.AggregateSpec(key='Analytic/default/HoldingCashflows',       #Lusid only
                                      op='Value')
                 #models.AggregateSpec(key='Analytic/default/MaturityDate',
                 #                     op='Value')
@@ -428,6 +424,142 @@ class Valuation(unittest.TestCase):
 
         print(response)
 
+    ####################################################
+    def test_FX_OPT_aggregation_inline_weightedVM(self):
+            # price simple fx opts..demonstrate sensible pvs.
+            # can update dates etc
+            trade_date = datetime.today().replace(tzinfo=pytz.utc)  # change to today for VolMaster
+            start_date = trade_date  # change to spot?
+
+            end_date_1y = start_date.replace(year=start_date.year+1)  # 1yr
+            end_date_2y = start_date.replace(year=start_date.year+2)  # 2yr
+            end_date_3y = start_date.replace(year=start_date.year+3)  # 3yr
+
+            dom_amount = 100000000
+            fgn_amount_1y = -131175000
+            fgn_amount_2y = -132350000
+            fgn_amount_3y = -133900000
+            # Use mkt fwd to generate close to 0 PV? or use 5y and have over and under
+            start_FX_price = 1.2975
+            fwd_FX_price_1y = 1.31175
+            fwd_FX_price_2y = 1.3235
+            fwd_FX_price_3y = 1.339
+            '''
+                The market data scope and supplier refer to (effectively) two fields in the database that describe who 'supplied' the data 
+                and the user 'scope' into which it is put. This *must* match the rule that is used to retrieve it or it simply will not be found. 
+            '''
+            marketDataScope = "TRRiskDomain"
+            marketSupplier = 'Lusid'
+
+            # Create a quote for the FX GBP/USD for 21/11/19
+            FX_quote = models.UpsertQuoteRequest(
+                quote_id=models.QuoteId(
+                    quote_series_id=models.QuoteSeriesId(
+                        provider=marketSupplier,
+                        instrument_id="GBP/USD",
+                        instrument_id_type='CurrencyPair',
+                        quote_type='Price',
+                        field='mid'),
+                    effective_at=start_date,
+                ),
+                metric_value=models.MetricValue(
+                    value=start_FX_price,
+                    unit='rate'),
+                lineage='InternalSystem')
+
+            # Call LUSID to upsert the quote
+            response = self.quotes_api.upsert_quotes(
+                scope=marketDataScope,
+                quotes={"1": FX_quote})
+
+            instrument_definition_1y = models.FxOption(
+                start_date=start_date.isoformat(),
+                option_maturity_date=end_date_1y.isoformat(),
+                option_settlement_date=start_date.isoformat(),
+                is_delivery_not_cash=False,
+                is_call_not_put=True,
+                strike=fwd_FX_price_1y,
+                dom_ccy="GBP",
+                fgn_ccy="USD",
+                instrument_type="FxOption"
+            )
+
+            instrument_definition_2y = models.FxOption(
+                start_date=start_date.isoformat(),
+                option_maturity_date=end_date_2y.isoformat(),
+                option_settlement_date=start_date.isoformat(),
+                is_delivery_not_cash=False,
+                is_call_not_put=True,
+                strike=fwd_FX_price_2y,
+                dom_ccy="GBP",
+                fgn_ccy="USD",
+                instrument_type="FxOption"
+            )
+
+            instrument_definition_3y = models.FxOption(
+                start_date=start_date.isoformat(),
+                option_maturity_date=end_date_3y.isoformat(),
+                option_settlement_date=start_date.isoformat(),
+                is_delivery_not_cash=False,
+                is_call_not_put=True,
+                strike=fwd_FX_price_3y,
+                dom_ccy="GBP",
+                fgn_ccy="USD",
+                instrument_type="FxOption"
+            )
+
+            print(response)
+
+            vendorModel = models.VendorModelRule(supplier="VolMaster", model_name="VendorDefault",
+                                                   instrument_type="FxOption", parameters="{}")
+
+            pricingContext = models.PricingContext(model_rules=[vendorModel])
+            marketContext = models.MarketContext(
+                options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope))
+
+            RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext, market=marketContext)
+
+            weightedInstrumentFXOpt_1y = models.WeightedInstrument(
+                quantity=1, holding_identifier="myholding1y",
+                instrument=instrument_definition_1y
+            )
+            weightedInstrumentFXOpt_2y = models.WeightedInstrument(
+                quantity=1, holding_identifier="myholding2y",
+                instrument=instrument_definition_2y
+            )
+            weightedInstrumentFXOpt_3y = models.WeightedInstrument(
+                quantity=1, holding_identifier="myholding3y",
+                instrument=instrument_definition_3y
+            )
+
+            weightedInstrumentList = [weightedInstrumentFXOpt_1y, weightedInstrumentFXOpt_2y,
+                                      weightedInstrumentFXOpt_3y]
+
+            aggregationRequestResource = models.AggregationRequest(
+                inline_recipe=RecipeId,
+                effective_at=start_date.isoformat(),
+                metrics=[
+                    models.AggregateSpec(key='Analytic/default/ValuationDate',
+                                         op='Value'),
+                    models.AggregateSpec(key='Holding/default/PV',
+                                         op='Value'),
+                    models.AggregateSpec(key='Analytic/default/DomCcy',
+                                         op='Value'),
+                    models.AggregateSpec(key='Analytic/default/FgnCcy',
+                                         op='Value'),
+                    models.AggregateSpec(key='Analytic/default/StartDate',
+                                         op='Value')
+                ]
+            )
+            inlineRequestFXFwd = models.InlineAggregationRequest(request=aggregationRequestResource,
+                                                                 instruments=weightedInstrumentList)
+
+            # Call LUSID to perform the aggregation
+
+            response = self.aggregation_api.get_aggregation_of_weighted_instruments(marketDataScope,
+                                                                                    inline_request=inlineRequestFXFwd)
+
+            print(response)
 
     ################################################
     def test_FX_FWD_CUTDOWN_aggregation_inline_weighted(self):
@@ -907,58 +1039,40 @@ class Valuation(unittest.TestCase):
         print(response)
 
     def test_delta(self):
+        # A test that demonstrates how to
+        #(1) Upload sample complex market data to Lusid, namely a pair of curves
+        #(2) Define an fx-forward instrument
+        #(3) Call Lusid to evaluate the Fx-Forward PV and its rates delta
 
         marketDataScope = "TRRiskDomain"
         marketSupplier = 'Lusid'
 
-        import xml.etree.ElementTree as ET
-        root = ET.parse('Lusid_MktData_Rates_Fra_JPY_20190101.xml')
-        rootString = ET.tostring(root.getroot())
+        trade_date = datetime.today().replace(tzinfo=pytz.utc)
+        start_date = trade_date #.replace(day=trade_date.day + 2)  # change to spot?
+        effectiveAt = start_date
 
-        JPYtree = xml.dom.minidom.parse('Lusid_MktData_Rates_Fra_JPY_20190101.xml')
-        USDtree = xml.dom.minidom.parse('Lusid_MktData_Rates_Fra_USD_20190101.xml')
-        from pathlib import Path
-        JPYTextTree = Path('Lusid_MktData_Rates_Fra_JPY_20190101.xml').read_text()
-        USDTextTree = Path('Lusid_MktData_Rates_Fra_USD_20190101.xml').read_text()
+        end_date_2m = start_date.replace(month=start_date.month + 2)  # 2m
+        end_date_4m = start_date.replace(year=start_date.month + 4)    # 4m
+        end_date_6m = start_date.replace(year=start_date.month + 6)    # 6m
 
+        ccyList=['USD', 'JPY']
 
-        SMD_JPY_curve = models.StructuredMarketData(rootString)
-
-        SMD_USD_curve = models.StructuredMarketData(USDTextTree)
-
-        SMDquote1 = models.UpsertStructuredMarketDataRequest(
-            market_data_id="SMD_id_1",
-            market_data=SMD_JPY_curve
-        )
-        SMDquote2 = models.UpsertStructuredMarketDataRequest(
-            market_data_id="SMD_id_2",
-            market_data=SMD_USD_curve
-        )
-
-        # Call LUSID to upsert structured market data
-        response = self.SMD_api.upsert_structured_market_data(
-            scope=marketDataScope,
-            structured_data={"1": SMDquote1, "2": SMDquote2}
-        )
-
-        trade_date = datetime(2020, 1, 9, tzinfo=pytz.utc)  # change to today?
-        start_date = datetime(2020, 1, 11, tzinfo=pytz.utc)  # change to spot?
-        end_date_6m = datetime(2020, 7, 11, tzinfo=pytz.utc)  # 3yr
+        response = self.create_structure_market_data(ccyList,effectiveAt, marketDataScope)
 
         dom_amount = 100000000
         fgn_amount_6m = dom_amount * -108.835
         start_FX_price = 109.943
 
-        # Create a quote for the FX GBP/USD for 21/11/19
+        # Create a quote for the FX USD/JPY for effective date
         FX_quote = models.UpsertQuoteRequest(
             quote_id=models.QuoteId(
                 quote_series_id=models.QuoteSeriesId(
-                    provider='marketSupplier',
+                    provider=marketSupplier,
                     instrument_id="USD/JPY",
                     instrument_id_type='CurrencyPair',
                     quote_type='Price',
                     field='mid'),
-                effective_at=start_date,
+                effective_at=effectiveAt,
             ),
             metric_value=models.MetricValue(
                 value=start_FX_price,
@@ -977,20 +1091,27 @@ class Valuation(unittest.TestCase):
             fixing_date=trade_date.isoformat(),
             fgn_ccy="JPY",
             ref_spot_rate=start_FX_price,
-            start_date=start_date.isoformat(),
+            start_date=effectiveAt.isoformat(),
             maturity_date=end_date_6m.isoformat(),
             dom_ccy="USD",
             instrument_type="FxForward")
 
-        print(response)
-
-        vendorModel = models.VendorModelRule(supplier="Lusid", model_name="SimpleStatic",
-                                             instrument_type="FxForward", parameters="{}")
-
-
-        pricingContext = models.PricingContext(model_rules=[vendorModel])
+        pricingContext = models.PricingContext(
+            options=models.PricingOptions(produce_separate_result_for_linear_otc_legs=False),
+            model_rules=[
+                models.VendorModelRule(supplier="Lusid", model_name="Discounting", instrument_type="FxForward",
+                                       parameters="{}")
+            ]
+        )
         marketContext = models.MarketContext(
-            options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope),market_rules=[])
+            options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope),
+            market_rules=[
+                models.MarketDataKeyRule(key="Fx.*.*", data_scope=marketDataScope, supplier=marketSupplier,
+                                         quote_type='Price', field='mid'),
+                models.MarketDataKeyRule(key="Rates.*.*", data_scope=marketDataScope, supplier=marketSupplier,
+                                         quote_type='Rate', field='mid')
+            ]
+        )
         RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext, market=marketContext)
 
         weightedInstrumentFXFwd_6m = models.WeightedInstrument(quantity=1, holding_identifier="myholding6m",
@@ -999,21 +1120,12 @@ class Valuation(unittest.TestCase):
         weightedInstrumentList = [weightedInstrumentFXFwd_6m]
 
         aggregationRequestResource = models.AggregationRequest(
-            # recipe_id=ResourceId,
             inline_recipe=RecipeId,
             effective_at=start_date.isoformat(),
             metrics=[
                 models.AggregateSpec(key='Analytic/default/ValuationDate',
                                      op='Value'),
                 models.AggregateSpec(key='Holding/default/PV',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/DomCcy',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/FgnCcy',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/StartDate',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/MaturityDate',
                                      op='Value'),
                 models.AggregateSpec(key='Holding/default/Delta',
                                      op='Value'),
@@ -1028,7 +1140,39 @@ class Valuation(unittest.TestCase):
 
         response = self.aggregation_api.get_aggregation_of_weighted_instruments(marketDataScope,
                                                                                 inline_request=inlineRequestFXFwd)
-        print(response.data[0])
         print(response)
 
-        print(response)
+    def loadFile(name):
+        with open(name, "r") as myfile:
+            data = myfile.read()
+        return data
+
+    def create_structure_market_data(self, ccyList, effectiveAt, scope):
+
+        # load set of structured market data description files.
+        # Note that the examples have hard-coded rates. However, these can be RIC references, instrument definitions etc..
+        # Please refer to online documentation for full details.
+
+        smdRequestDictionary = {}
+        for ccy in ccyList:
+            # load doc
+            fileName = 'Lusid_MktData_Rates_Fra_%s_20190101.xml' % ccy
+            xmlDoc = Valuation.loadFile(fileName)
+            # create request
+            structuredDoc = models.StructuredMarketData(document_format="Xml", version="1.0.0",
+                                                        name="%sRatesCurve" % ccy, document=xmlDoc)
+            structuredId = models.StructuredMarketDataId(provider="Lusid",price_source=None,            #price source to be added when rules can pick up
+                                                         lineage="MyDemoData", effective_at=effectiveAt,
+                                                         market_element_type="ZeroCurve",
+                                                         market_asset="%s/%sOIS" % (ccy, ccy))
+            smdRequest = models.UpsertStructuredMarketDataRequest(market_data_id=structuredId,
+                                                                  market_data=structuredDoc)
+            smdRequestDictionary[ccy] = smdRequest
+
+        # Call LUSID to upsert structured market data
+        response = self.SMD_api.upsert_structured_market_data(
+            scope=scope,
+            structured_data=smdRequestDictionary
+        )
+
+        return response
