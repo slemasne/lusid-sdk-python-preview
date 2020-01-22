@@ -168,8 +168,6 @@ class Valuation(unittest.TestCase):
         marketDataScope = "TRRiskDomain"
         marketSupplier = 'Lusid'
 
-
-
         # Create a quote for the FX GBP/USD for today
         FX_quote = models.UpsertQuoteRequest(
             quote_id=models.QuoteId(
@@ -298,6 +296,149 @@ class Valuation(unittest.TestCase):
     # Strike is set as the fwd FX level to approximate ATM
     # Models tested/compared are QPS, Tracs and VolMaster
     # LUSID aggregation in inline, using weighted instruments which are not persisted
+
+    def test_FX_OPT(self):
+
+        trade_date = datetime.today().replace(tzinfo=pytz.utc)
+        start_date = trade_date
+
+        end_date_1y = start_date.replace(year=start_date.year + 1)
+        end_date_2y = start_date.replace(year=start_date.year + 2)
+        end_date_3y = start_date.replace(year=start_date.year + 3)
+
+        dom_amount = 100000000
+
+        fwd_FX_price_1y = self.start_GBPUSD_FX_price + self.GBPUSDpip_1y / 10000
+        fwd_FX_price_2y = self.start_GBPUSD_FX_price + self.GBPUSDpip_2y / 10000
+        fwd_FX_price_3y = self.start_GBPUSD_FX_price + self.GBPUSDpip_3y / 10000
+
+        fgn_amount_1y = dom_amount * -fwd_FX_price_1y
+        fgn_amount_2y = dom_amount * -fwd_FX_price_2y
+        fgn_amount_3y = dom_amount * -fwd_FX_price_3y
+
+        '''
+            The market data scope and supplier refer to (effectively) two fields in the database that describe who 'supplied' the data 
+            and the user 'scope' into which it is put. This *must* match the rule that is used to retrieve it or it simply will not be found. 
+        '''
+        marketDataScope = "TRRiskDomain"
+        marketSupplier = 'Lusid'
+
+        # Create a quote for the FX GBP/USD for today
+        FX_quote = models.UpsertQuoteRequest(
+            quote_id=models.QuoteId(
+                quote_series_id=models.QuoteSeriesId(
+                    provider=marketSupplier,
+                    instrument_id="GBP/USD",
+                    instrument_id_type='CurrencyPair',
+                    quote_type='Price',
+                    field='mid'),
+                effective_at=start_date,
+            ),
+            metric_value=models.MetricValue(
+                value=self.start_GBPUSD_FX_price,
+                unit='rate'),
+            lineage='InternalSystem')
+
+        # Call LUSID to upsert the quote
+        response = self.quotes_api.upsert_quotes(
+            scope=marketDataScope,
+            quotes={"1": FX_quote})
+
+        instrument_definition_1y = models.FxOption(
+            start_date=start_date.isoformat(),
+            option_maturity_date=end_date_1y.isoformat(),
+            option_settlement_date=end_date_1y.isoformat(),
+            is_delivery_not_cash=True,
+            is_call_not_put=True,
+            strike=fwd_FX_price_1y,
+            dom_ccy="GBP",
+            fgn_ccy="USD",
+            instrument_type="FxOption"
+        )
+
+        instrument_definition_2y = models.FxOption(
+            start_date=start_date.isoformat(),
+            option_maturity_date=end_date_2y.isoformat(),
+            option_settlement_date=end_date_2y.isoformat(),
+            is_delivery_not_cash=True,
+            is_call_not_put=True,
+            strike=fwd_FX_price_2y,
+            dom_ccy="GBP",
+            fgn_ccy="USD",
+            instrument_type="FxOption"
+        )
+
+        instrument_definition_3y = models.FxOption(
+            start_date=start_date.isoformat(),
+            option_maturity_date=end_date_3y.isoformat(),
+            option_settlement_date=end_date_3y.isoformat(),
+            is_delivery_not_cash=True,
+            is_call_not_put=True,
+            strike=fwd_FX_price_3y,
+            dom_ccy="GBP",
+            fgn_ccy="USD",
+            instrument_type="FxOption"
+        )
+
+        print(response)
+
+        vendorModel = []
+        vendorModel.append(models.VendorModelRule(supplier="RefinitivQps", model_name="VendorDefault",
+                                                  instrument_type="FxOption", parameters="{}"))
+
+        vendorModel.append(models.VendorModelRule(supplier="VolMaster", model_name="VendorDefault",
+                                                  instrument_type="FxOption", parameters="{}"))
+
+        vendorModel.append(models.VendorModelRule(supplier="RefinitivTracsWeb", model_name="VendorDefault",
+                                                  instrument_type="FxOption", parameters="{}"))
+
+        weightedInstrumentFXOpt_1y = models.WeightedInstrument(
+            quantity=1, holding_identifier="myholding1y",
+            instrument=instrument_definition_1y
+        )
+        weightedInstrumentFXOpt_2y = models.WeightedInstrument(
+            quantity=1, holding_identifier="myholding2y",
+            instrument=instrument_definition_2y
+        )
+        weightedInstrumentFXOpt_3y = models.WeightedInstrument(
+            quantity=1, holding_identifier="myholding3y",
+            instrument=instrument_definition_3y
+        )
+
+        weightedInstrumentList = [weightedInstrumentFXOpt_1y, weightedInstrumentFXOpt_2y, weightedInstrumentFXOpt_3y]
+
+        for model in vendorModel:
+            pricingContext = models.PricingContext(model_rules=[model])
+            marketContext = models.MarketContext(
+                options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope))
+
+            RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext, market=marketContext)
+
+            aggregationRequestResource = models.AggregationRequest(
+                inline_recipe=RecipeId,
+                effective_at=start_date.isoformat(),
+                metrics=[
+                    models.AggregateSpec(key='Analytic/default/ValuationDate',
+                                         op='Value'),
+                    models.AggregateSpec(key='Holding/default/PV',
+                                         op='Value'),
+                    models.AggregateSpec(key='Analytic/default/DomCcy',
+                                         op='Value'),
+                    models.AggregateSpec(key='Analytic/default/FgnCcy',
+                                         op='Value'),
+                    models.AggregateSpec(key='Analytic/default/StartDate',
+                                         op='Value')
+                ]
+            )
+            inlineRequestFXOpt = models.InlineAggregationRequest(request=aggregationRequestResource,
+                                                                 instruments=weightedInstrumentList)
+
+            # Call LUSID to perform the aggregation
+
+            response = self.aggregation_api.get_aggregation_of_weighted_instruments(marketDataScope,
+                                                                                    inline_request=inlineRequestFXOpt)
+
+            print(response)
 
     def test_delta(self):
         # A test that demonstrates how to
@@ -1207,148 +1348,6 @@ class Valuation(unittest.TestCase):
 
         print(response)
 
-    def test_FX_OPT(self):
-
-        trade_date = datetime.today().replace(tzinfo=pytz.utc)
-        start_date = trade_date
-
-        end_date_1y = start_date.replace(year=start_date.year + 1)
-        end_date_2y = start_date.replace(year=start_date.year + 2)
-        end_date_3y = start_date.replace(year=start_date.year + 3)
-
-        dom_amount = 100000000
-
-        fwd_FX_price_1y = self.start_GBPUSD_FX_price + self.GBPUSDpip_1y / 10000
-        fwd_FX_price_2y = self.start_GBPUSD_FX_price + self.GBPUSDpip_2y / 10000
-        fwd_FX_price_3y = self.start_GBPUSD_FX_price + self.GBPUSDpip_3y / 10000
-
-        fgn_amount_1y = dom_amount * -fwd_FX_price_1y
-        fgn_amount_2y = dom_amount * -fwd_FX_price_2y
-        fgn_amount_3y = dom_amount * -fwd_FX_price_3y
-
-        '''
-            The market data scope and supplier refer to (effectively) two fields in the database that describe who 'supplied' the data 
-            and the user 'scope' into which it is put. This *must* match the rule that is used to retrieve it or it simply will not be found. 
-        '''
-        marketDataScope = "TRRiskDomain"
-        marketSupplier = 'Lusid'
-
-        # Create a quote for the FX GBP/USD for today
-        FX_quote = models.UpsertQuoteRequest(
-            quote_id=models.QuoteId(
-                quote_series_id=models.QuoteSeriesId(
-                    provider=marketSupplier,
-                    instrument_id="GBP/USD",
-                    instrument_id_type='CurrencyPair',
-                    quote_type='Price',
-                    field='mid'),
-                effective_at=start_date,
-            ),
-            metric_value=models.MetricValue(
-                value=self.start_GBPUSD_FX_price,
-                unit='rate'),
-            lineage='InternalSystem')
-
-        # Call LUSID to upsert the quote
-        response = self.quotes_api.upsert_quotes(
-            scope=marketDataScope,
-            quotes={"1": FX_quote})
-
-        instrument_definition_1y = models.FxOption(
-            start_date=start_date.isoformat(),
-            option_maturity_date=end_date_1y.isoformat(),
-            option_settlement_date=end_date_1y.isoformat(),
-            is_delivery_not_cash=True,
-            is_call_not_put=True,
-            strike=fwd_FX_price_1y,
-            dom_ccy="GBP",
-            fgn_ccy="USD",
-            instrument_type="FxOption"
-        )
-
-        instrument_definition_2y = models.FxOption(
-            start_date=start_date.isoformat(),
-            option_maturity_date=end_date_2y.isoformat(),
-            option_settlement_date=end_date_2y.isoformat(),
-            is_delivery_not_cash=True,
-            is_call_not_put=True,
-            strike=fwd_FX_price_2y,
-            dom_ccy="GBP",
-            fgn_ccy="USD",
-            instrument_type="FxOption"
-        )
-
-        instrument_definition_3y = models.FxOption(
-            start_date=start_date.isoformat(),
-            option_maturity_date=end_date_3y.isoformat(),
-            option_settlement_date=end_date_3y.isoformat(),
-            is_delivery_not_cash=True,
-            is_call_not_put=True,
-            strike=fwd_FX_price_3y,
-            dom_ccy="GBP",
-            fgn_ccy="USD",
-            instrument_type="FxOption"
-        )
-
-        print(response)
-
-        vendorModel = []
-        vendorModel.append(models.VendorModelRule(supplier="RefinitivQps", model_name="VendorDefault",
-                                                  instrument_type="FxOption", parameters="{}"))
-
-        vendorModel.append(models.VendorModelRule(supplier="VolMaster", model_name="VendorDefault",
-                                                  instrument_type="FxOption", parameters="{}"))
-
-        vendorModel.append(models.VendorModelRule(supplier="RefinitivTracsWeb", model_name="VendorDefault",
-                                                  instrument_type="FxOption", parameters="{}"))
-
-        weightedInstrumentFXOpt_1y = models.WeightedInstrument(
-            quantity=1, holding_identifier="myholding1y",
-            instrument=instrument_definition_1y
-        )
-        weightedInstrumentFXOpt_2y = models.WeightedInstrument(
-            quantity=1, holding_identifier="myholding2y",
-            instrument=instrument_definition_2y
-        )
-        weightedInstrumentFXOpt_3y = models.WeightedInstrument(
-            quantity=1, holding_identifier="myholding3y",
-            instrument=instrument_definition_3y
-        )
-
-        weightedInstrumentList = [weightedInstrumentFXOpt_1y, weightedInstrumentFXOpt_2y, weightedInstrumentFXOpt_3y]
-
-        for model in vendorModel:
-            pricingContext = models.PricingContext(model_rules=[model])
-            marketContext = models.MarketContext(
-                options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope))
-
-            RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext, market=marketContext)
-
-            aggregationRequestResource = models.AggregationRequest(
-                inline_recipe=RecipeId,
-                effective_at=start_date.isoformat(),
-                metrics=[
-                    models.AggregateSpec(key='Analytic/default/ValuationDate',
-                                         op='Value'),
-                    models.AggregateSpec(key='Holding/default/PV',
-                                         op='Value'),
-                    models.AggregateSpec(key='Analytic/default/DomCcy',
-                                         op='Value'),
-                    models.AggregateSpec(key='Analytic/default/FgnCcy',
-                                         op='Value'),
-                    models.AggregateSpec(key='Analytic/default/StartDate',
-                                         op='Value')
-                ]
-            )
-            inlineRequestFXOpt = models.InlineAggregationRequest(request=aggregationRequestResource,
-                                                                 instruments=weightedInstrumentList)
-
-            # Call LUSID to perform the aggregation
-
-            response = self.aggregation_api.get_aggregation_of_weighted_instruments(marketDataScope,
-                                                                                    inline_request=inlineRequestFXOpt)
-
-            print(response)
 
         ####################################################
 
