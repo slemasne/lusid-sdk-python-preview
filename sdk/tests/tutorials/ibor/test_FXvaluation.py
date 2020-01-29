@@ -25,14 +25,16 @@ class Valuation(unittest.TestCase):
         cls.quotes_api = lusid.QuotesApi(api_client)
         cls.SMD_api = lusid.StructuredMarketDataApi(api_client)
         cls.start_GBPUSD_FX_price = 1.301800
-        cls.start_USDJPY_FX_price = 109.021
+        cls.start_USDJPY_FX_price = 109.106
         cls.GBPUSDpip_1y = 149
         cls.GBPUSDpip_2y = 273
         cls.GBPUSDpip_3y = 342
         cls.GBPUSDpip_5y = 621
         cls.GBPUSDpip_10y = 1200
-        cls.USDJPYpip_6m = 106.7
-
+        cls.USDJPYpip_3m = 53
+        cls.USDJPYpip_6m = 107
+        cls.USDJPYpip_9m = 157.5
+        cls.USDJPYpip_12m = 211
 
     def test_portfolio_aggregation(self):
 
@@ -150,7 +152,6 @@ class Valuation(unittest.TestCase):
         trade_date = datetime.today().replace(tzinfo=pytz.utc)
         start_date = trade_date
 
-        pricing_date = trade_date - timedelta(days=1)
         end_date_3y = start_date.replace(year=start_date.year + 3)
         end_date_5y = start_date.replace(year=start_date.year + 5)
         end_date_10y = start_date.replace(year=start_date.year + 10)
@@ -234,14 +235,14 @@ class Valuation(unittest.TestCase):
 
         vendorModel=[]
 
-        # vendorModel.append(models.VendorModelRule(supplier="RefinitivQps", model_name="VendorDefault",
-        #                                      instrument_type="FxForward", parameters="{}"))
+        vendorModel.append(models.VendorModelRule(supplier="RefinitivQps", model_name="VendorDefault",
+                                             instrument_type="FxForward", parameters="{}"))
 
         vendorModel.append(models.VendorModelRule(supplier="RefinitivTracsWeb", model_name="VendorDefault",
                                              instrument_type="FxForward", parameters="{}"))
 
-        # vendorModel.append(models.VendorModelRule(supplier="VolMaster", model_name="VendorDefault",
-        #                                      instrument_type="FxForward", parameters="{}"))
+        vendorModel.append(models.VendorModelRule(supplier="VolMaster", model_name="VendorDefault",
+                                             instrument_type="FxForward", parameters="{}"))
 
         weightedInstrumentFXFwd_3y = models.WeightedInstrument(quantity=1, holding_identifier="myholding3y",
                                                             instrument=instrument_definition_3y)
@@ -262,10 +263,10 @@ class Valuation(unittest.TestCase):
 
             RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext, market=marketContext)
 
-            # pricing_date = datetime.today().replace(tzinfo=pytz.utc)
-            # if model.supplier == "RefinitivTracsWeb":
-            #     pricing_date = pricing_date.replace(day=pricing_date.day -1)
-
+            if model.supplier == "RefinitivTracsWeb":
+                pricing_date = trade_date - timedelta(days=1)
+            else:
+                pricing_date = trade_date
             aggregationRequestResource = models.AggregationRequest(
                 inline_recipe=RecipeId,
                 effective_at=pricing_date.isoformat(),
@@ -422,9 +423,14 @@ class Valuation(unittest.TestCase):
 
             RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext, market=marketContext)
 
+            if model.supplier == "RefinitivTracsWeb":
+                pricing_date = trade_date - timedelta(days=1)
+            else:
+                pricing_date = trade_date
+
             aggregationRequestResource = models.AggregationRequest(
                 inline_recipe=RecipeId,
-                effective_at=start_date.isoformat(),
+                effective_at=pricing_date.isoformat(),
                 metrics=[
                     models.AggregateSpec(key='Analytic/default/ValuationDate',
                                          op='Value'),
@@ -473,17 +479,21 @@ class Valuation(unittest.TestCase):
         start_date = trade_date
         effectiveAt = start_date
 
-        end_date_2m = start_date.replace(month=start_date.month + 2)
-        end_date_4m = start_date.replace(month=start_date.month + 4)
+
+        end_date_3m = start_date.replace(month=start_date.month + 3)
         end_date_6m = start_date.replace(month=start_date.month + 6)
+        end_date_9m = start_date.replace(month=start_date.month + 9)
+        end_date_12m = start_date.replace(year=start_date.year + 1)
 
         ccyList=['USD', 'JPY']
 
         response = self.create_structure_market_data(ccyList,effectiveAt, marketDataScope)
 
         dom_amount = 100000000
-        fgn_amount_6m = dom_amount * -(self.start_USDJPY_FX_price - self.USDJPYpip_6m/100)
-
+        fgn_amount_3m = dom_amount * -(self.start_USDJPY_FX_price - self.USDJPYpip_3m / 100)
+        fgn_amount_6m = dom_amount * -(self.start_USDJPY_FX_price - self.USDJPYpip_6m /100)
+        fgn_amount_9m = dom_amount * -(self.start_USDJPY_FX_price - self.USDJPYpip_9m / 100)
+        fgn_amount_12m = dom_amount * -(self.start_USDJPY_FX_price - self.USDJPYpip_12m / 100)
 
         # Create a quote for the FX USD/JPY for effective date
         FX_quote = models.UpsertQuoteRequest(
@@ -506,6 +516,18 @@ class Valuation(unittest.TestCase):
             scope=marketDataScope,
             quotes={"1": FX_quote})
 
+        instrument_definition_3m = models.FxForwardInstrument(
+            dom_amount=dom_amount,
+            fgn_amount=-fgn_amount_3m,
+            is_ndf=False,
+            fixing_date=trade_date.isoformat(),
+            fgn_ccy="JPY",
+            ref_spot_rate=self.start_USDJPY_FX_price,
+            start_date=effectiveAt.isoformat(),
+            maturity_date=end_date_3m.isoformat(),
+            dom_ccy="USD",
+            instrument_type="FxForward")
+
         instrument_definition_6m = models.FxForwardInstrument(
             dom_amount=dom_amount,
             fgn_amount=-fgn_amount_6m,
@@ -515,6 +537,30 @@ class Valuation(unittest.TestCase):
             ref_spot_rate=self.start_USDJPY_FX_price,
             start_date=effectiveAt.isoformat(),
             maturity_date=end_date_6m.isoformat(),
+            dom_ccy="USD",
+            instrument_type="FxForward")
+
+        instrument_definition_9m = models.FxForwardInstrument(
+            dom_amount=dom_amount,
+            fgn_amount=-fgn_amount_9m,
+            is_ndf=False,
+            fixing_date=trade_date.isoformat(),
+            fgn_ccy="JPY",
+            ref_spot_rate=self.start_USDJPY_FX_price,
+            start_date=effectiveAt.isoformat(),
+            maturity_date=end_date_9m.isoformat(),
+            dom_ccy="USD",
+            instrument_type="FxForward")
+
+        instrument_definition_12m = models.FxForwardInstrument(
+            dom_amount=dom_amount,
+            fgn_amount=-fgn_amount_12m,
+            is_ndf=False,
+            fixing_date=trade_date.isoformat(),
+            fgn_ccy="JPY",
+            ref_spot_rate=self.start_USDJPY_FX_price,
+            start_date=effectiveAt.isoformat(),
+            maturity_date=end_date_12m.isoformat(),
             dom_ccy="USD",
             instrument_type="FxForward")
 
@@ -536,10 +582,15 @@ class Valuation(unittest.TestCase):
         )
         RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext, market=marketContext)
 
+        weightedInstrumentFXFwd_3m = models.WeightedInstrument(quantity=1, holding_identifier="myholding3m",
+                                                               instrument=instrument_definition_3m)
         weightedInstrumentFXFwd_6m = models.WeightedInstrument(quantity=1, holding_identifier="myholding6m",
                                                                instrument=instrument_definition_6m)
-
-        weightedInstrumentList = [weightedInstrumentFXFwd_6m]
+        weightedInstrumentFXFwd_9m = models.WeightedInstrument(quantity=1, holding_identifier="myholding9m",
+                                                               instrument=instrument_definition_9m)
+        weightedInstrumentFXFwd_12m = models.WeightedInstrument(quantity=1, holding_identifier="myholding12m",
+                                                               instrument=instrument_definition_12m)
+        weightedInstrumentList = [weightedInstrumentFXFwd_12m]
 
         aggregationRequestResource = models.AggregationRequest(
             inline_recipe=RecipeId,
@@ -890,7 +941,7 @@ class Valuation(unittest.TestCase):
         marketSupplier = 'Lusid'
 
         # Create a quote for the FX GBP/USD for today, firstly with the erroneous FX (record the time)
-        pre_quote_time1 = datetime.now().replace(tzinfo=pytz.utc)
+
         FX_quote = models.UpsertQuoteRequest(
             quote_id=models.QuoteId(
                 quote_series_id=models.QuoteSeriesId(
@@ -911,7 +962,7 @@ class Valuation(unittest.TestCase):
             scope=marketDataScope,
             quotes={"1": FX_quote})
 
-        added_quote_time1 = datetime.now().replace(tzinfo=pytz.utc)
+        added_quote_time1 = response.values['1']._as_at
 
         # Create a quote for the FX GBP/USD for today, and now with the correct FX (again, record the time)
         FX_quote = models.UpsertQuoteRequest(
@@ -934,7 +985,7 @@ class Valuation(unittest.TestCase):
             scope=marketDataScope,
             quotes={"1": FX_quote})
 
-        added_quote_time2 = response.values
+        added_quote_time2 = response.values['1']._as_at
 
 
 
