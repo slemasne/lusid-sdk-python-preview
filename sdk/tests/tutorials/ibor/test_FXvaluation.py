@@ -9,6 +9,16 @@ import lusid.models as models
 from utilities import TestDataUtilities
 from collections import defaultdict
 import json
+import pandas as pd
+
+
+# # Cocoon
+from lusidtools import cocoon as lpt
+from lusidtools.pandas_utils.lusid_pandas import lusid_response_to_data_frame
+from lusidtools.cocoon.cocoon_printer import format_instruments_response, format_portfolios_response, format_transactions_response, format_quotes_response
+
+
+
 #from xml.etree import ElementTree
 import xml.dom.minidom
 
@@ -17,20 +27,22 @@ class Valuation(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         # create a configured API client
-        api_client = TestDataUtilities.api_client()
-
-        cls.transaction_portfolios_api = lusid.TransactionPortfoliosApi(api_client)
-        cls.instruments_api = lusid.InstrumentsApi(api_client)
-        cls.aggregation_api = lusid.AggregationApi(api_client)
-        cls.quotes_api = lusid.QuotesApi(api_client)
-        cls.SMD_api = lusid.StructuredMarketDataApi(api_client)
-        cls.start_GBPUSD_FX_price = 1.301800
+        cls.api_client = TestDataUtilities.api_client()
+        cls.api_factory = lusid.utilities.api_client_factory.ApiClientFactory(api_secrets_filename="../../secrets.json")
+        cls.transaction_portfolios_api = lusid.TransactionPortfoliosApi(cls.api_client)
+        cls.instruments_api = lusid.InstrumentsApi(cls.api_client)
+        cls.aggregation_api = lusid.AggregationApi(cls.api_client)
+        cls.quotes_api = lusid.QuotesApi(cls.api_client)
+        cls.SMD_api = lusid.StructuredMarketDataApi(cls.api_client)
+        cls.start_GBPUSD_FX_price = 1.2999
         cls.start_USDJPY_FX_price = 109.106
-        cls.GBPUSDpip_1y = 149
-        cls.GBPUSDpip_2y = 273
-        cls.GBPUSDpip_3y = 342
-        cls.GBPUSDpip_5y = 621
-        cls.GBPUSDpip_10y = 1200
+        cls.start_EURGBP_FX_price = 0.84247
+
+        cls.GBPUSDpip_1y = 135
+        cls.GBPUSDpip_2y = 235
+        cls.GBPUSDpip_3y = 325
+        cls.GBPUSDpip_5y = 519
+        cls.GBPUSDpip_10y = 1100
         cls.USDJPYpip_3m = 53
         cls.USDJPYpip_6m = 107
         cls.USDJPYpip_9m = 157.5
@@ -139,12 +151,11 @@ class Valuation(unittest.TestCase):
 
 
     ################################################
-    # Test: FXFwds
+    # Test: FXFwds, returning the PV from 3 different models:
+    # QPS, Tracs and VolMaster, showing the simplicity of revaluing with different vendor models
     # Maturities are 3, 5, and 10 years
     # GBPUSD FX fwds, with pips taken from https://www.barchart.com/forex/quotes/%5EGBPUSD/forward-rates
-    # Which are a rough market mid
     # Spot FX is global, taken from the same site
-    # Models tested/compared are QPS, Tracs and VolMaster
     # LUSID aggregation in inline, using weighted instruments which are not persisted
 
     def test_FX_FWD(self):
@@ -157,24 +168,26 @@ class Valuation(unittest.TestCase):
         end_date_10y = start_date.replace(year=start_date.year + 10)
 
         dom_amount = 100000000
-        # Use mkt fwd to generate close to 0 PV? or use 5y and have over and under
+
+        # Use mkt fwd pips to generate fwd FX prices for foreign leg (USD)
 
         fwd_FX_price_3y = self.start_GBPUSD_FX_price + self.GBPUSDpip_3y / 10000
         fwd_FX_price_5y = self.start_GBPUSD_FX_price + self.GBPUSDpip_5y / 10000
         fwd_FX_price_10y = self.start_GBPUSD_FX_price + self.GBPUSDpip_10y / 10000
 
+        # use foreign fwd FX price to generate foreign cash leg
         fgn_amount_3y = dom_amount * -fwd_FX_price_3y
         fgn_amount_5y = dom_amount * -fwd_FX_price_5y
         fgn_amount_10y = dom_amount * -fwd_FX_price_10y
 
-         #The market data scope and supplier refer to the user 'scope' into which market data is stored and the supplier
-        #or owner of that data (not the source of it) respectively.
-        #This *must* match the rule that is used to retrieve it or it will not be found.
+        #The market data scope refers to the user partition into which market data is stored
+        #The supplier denotes the owner of the market data (not the price source)
+        #This *must* match the recipe ruleset that is used to retrieve the data or it will not be found.
 
         marketDataScope = "TRRiskDomain"
         marketSupplier = 'Lusid'
 
-        # Create a quote for the FX GBP/USD for today
+        # Create a quote for spot FX GBP/USD
         FX_quote = models.UpsertQuoteRequest(
             quote_id=models.QuoteId(
                 quote_series_id=models.QuoteSeriesId(
@@ -194,6 +207,8 @@ class Valuation(unittest.TestCase):
         response = self.quotes_api.upsert_quotes(
             scope=marketDataScope,
             quotes={"1": FX_quote})
+
+        #create the FX forward instruments
 
         instrument_definition_3y = models.FxForwardInstrument(
             dom_amount=dom_amount,
@@ -233,6 +248,8 @@ class Valuation(unittest.TestCase):
 
         print(response)
 
+        #set up a simple list of the 3 vendor models we will be applying
+
         vendorModel=[]
 
         vendorModel.append(models.VendorModelRule(supplier="RefinitivQps", model_name="VendorDefault",
@@ -243,6 +260,9 @@ class Valuation(unittest.TestCase):
 
         vendorModel.append(models.VendorModelRule(supplier="VolMaster", model_name="VendorDefault",
                                              instrument_type="FxForward", parameters="{}"))
+
+
+        #next we take the fwd instruments and add them to an inline weighted instrument list for pricing
 
         weightedInstrumentFXFwd_3y = models.WeightedInstrument(quantity=1, holding_identifier="myholding3y",
                                                             instrument=instrument_definition_3y)
@@ -255,18 +275,28 @@ class Valuation(unittest.TestCase):
 
         weightedInstrumentList = [weightedInstrumentFXFwd_3y, weightedInstrumentFXFwd_5y, weightedInstrumentFXFwd_10y]
 
+        # finally we loop through each vendor model in our list and call the aggregation
 
         for model in vendorModel:
+
+            # to create the recipe, in this case we will need a pricing and a market context.
+            # the former attaches the pricing model used and parameters around its usage
+            # the latter contains instructions on the market data source and rules
             pricingContext = models.PricingContext(model_rules=[model])
             marketContext = models.MarketContext(
                 options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope))
 
+            # the recipe then binds together these constituents
             RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext, market=marketContext)
 
             if model.supplier == "RefinitivTracsWeb":
                 pricing_date = trade_date - timedelta(days=1)
             else:
                 pricing_date = trade_date
+
+            # the aggregation is a powerful mechanism for producing a result set, we will show later how the cashflow
+            # output can be pushed straight back into the movements engine. It can also persist external results
+            # and will shortly combine with Honeycomb for reporting
             aggregationRequestResource = models.AggregationRequest(
                 inline_recipe=RecipeId,
                 effective_at=pricing_date.isoformat(),
@@ -288,7 +318,7 @@ class Valuation(unittest.TestCase):
             inlineRequestFXFwd = models.InlineAggregationRequest(request=aggregationRequestResource,
                                                                  instruments=weightedInstrumentList)
 
-            # Call LUSID to perform the aggregation
+            # Call LUSID to perform the aggregation, print the result
 
             response = self.aggregation_api.get_aggregation_of_weighted_instruments(marketDataScope,
                                                                                     inline_request=inlineRequestFXFwd)
@@ -296,13 +326,11 @@ class Valuation(unittest.TestCase):
             print(response)
 
     ################################################
-    # Test: FXOptions
+    # Test: FXOptions, returning the PV from 3 different models:
+    # QPS, Tracs and VolMaster, showing the simplicity of revaluing with different vendor models
     # Maturities are 1, 2, and 3 years
     # GBPUSD FX fwds, with pips taken from https://www.barchart.com/forex/quotes/%5EGBPUSD/forward-rates
-    # Which are a rough market mid
-    # Spot FX is global, taken from the same site
     # Strike is set as the fwd FX level to approximate ATM
-    # Models tested/compared are QPS, Tracs and VolMaster
     # LUSID aggregation in inline, using weighted instruments which are not persisted
 
     def test_FX_OPT(self):
@@ -394,11 +422,13 @@ class Valuation(unittest.TestCase):
         vendorModel.append(models.VendorModelRule(supplier="RefinitivQps", model_name="VendorDefault",
                                                   instrument_type="FxOption", parameters="{}"))
 
+        # vendorModel.append(models.VendorModelRule(supplier="RefinitivTracsWeb", model_name="VendorDefault",
+        #                                           instrument_type="FxOption", parameters="{}"))
+
         vendorModel.append(models.VendorModelRule(supplier="VolMaster", model_name="VendorDefault",
                                                   instrument_type="FxOption", parameters="{}"))
 
-        vendorModel.append(models.VendorModelRule(supplier="RefinitivTracsWeb", model_name="VendorDefault",
-                                                  instrument_type="FxOption", parameters="{}"))
+
 
         notional =100000000
         weightedInstrumentFXOpt_1y = models.WeightedInstrument(
@@ -457,20 +487,17 @@ class Valuation(unittest.TestCase):
             print(response)
 
     ################################################
-    # Test: Show bump and value delta with a series of 3 FXFwds
-    # Maturities are 1, 2, and 3 years
+    # Test: Show bump and value delta with a series of 4 FXFwds
+    # Maturities are 3m, 6m, 9m, 1y
+    # Test creates FRA curves for USD and JPY out to 1 year with flat rates
+    # Risk can be compared across maturities...rerun manually to show risk down the curve
     # USDJPY FX fwds, with pips taken from https://www.barchart.com/forex/quotes/%5EUSDJPY/forward-rates
-    # Which are a rough market mid
     # Spot FX is global, taken from the same site
-    # Strike is set as the fwd FX level to approximate ATM
     # Models tested - LUSID
     # LUSID aggregation in inline, using weighted instruments which are not persisted
 
     def test_delta_lusid(self):
-        # A test that demonstrates how to
-        #(1) Upload sample complex market data to Lusid, namely a pair of curves
-        #(2) Define an fx-forward instrument
-        #(3) Call Lusid to evaluate the Fx-Forward PV and its rates delta
+
 
         marketDataScope = "TRRiskDomain"
         marketSupplier = 'Lusid'
@@ -487,6 +514,8 @@ class Valuation(unittest.TestCase):
 
         ccyList=['USD', 'JPY']
 
+        # call the curve load and creation. note the market data scope passed determines the loaction
+        # and is used later for retrieval
         response = self.create_structure_market_data(ccyList,effectiveAt, marketDataScope)
 
         dom_amount = 100000000
@@ -590,7 +619,7 @@ class Valuation(unittest.TestCase):
                                                                instrument=instrument_definition_9m)
         weightedInstrumentFXFwd_12m = models.WeightedInstrument(quantity=1, holding_identifier="myholding12m",
                                                                instrument=instrument_definition_12m)
-        weightedInstrumentList = [weightedInstrumentFXFwd_12m]
+        weightedInstrumentList = [weightedInstrumentFXFwd_6m]
 
         aggregationRequestResource = models.AggregationRequest(
             inline_recipe=RecipeId,
@@ -625,6 +654,7 @@ class Valuation(unittest.TestCase):
         # load set of structured market data description files.
         # Note that the examples have hard-coded rates. However, these can be RIC references, instrument definitions etc..
         # Please refer to online documentation for full details.
+        # Upsert the curves into the same scope as the earlier FX quote
 
         smdRequestDictionary = {}
         for ccy in ccyList:
@@ -653,12 +683,9 @@ class Valuation(unittest.TestCase):
 
     ################################################
     # Test: Show option expiry ladder with a series of 9 aged FXFwds
-    # Expiries are in the next few days
-    # USDJPY FX fwds, with pips taken from https://www.barchart.com/forex/quotes/%5EUSDJPY/forward-rates
-    # Which are a rough market mid
-    # Spot FX is global, taken from the same site
-    # Strike is set as the fwd FX level to approximate ATM
-    # Models tested - LUSID
+    # Expiries are in the next few days, so we must be aware of imminent actions required
+    # Result set shows events and cashflows
+    # The events connect to cashflow management, visualisation, workflow triggers
     # LUSID aggregation in inline, using weighted instruments which are not persisted
 
     def test_FXOption_expiry_schedule(self):
@@ -888,14 +915,14 @@ class Valuation(unittest.TestCase):
 
         cf2=defaultdict(float)
 
-        # for options we should see nonsense cashflows
+        # for options we should see NaN for cashflows
         for i in response.data:
             (dt,dtv) = next(iter(i['Analytic/default/HoldingCashflows']['slices']['USD']['labelsY'].items()))
             (cash,v2) = next(iter(i['Analytic/default/HoldingCashflows']['slices']['USD']['values'].items()))
             cf2[dt] += v2
         print(cf2)
 
-        #or check for nextEventType = Exercise and collect nextEvent dates as a unique set
+        # check for nextEventType = Exercise and collect nextEvent dates as a unique set
         eventList = set()
         for i in response.data:
             if i['Analytic/default/NextEventType']=="Exercise":
@@ -904,56 +931,50 @@ class Valuation(unittest.TestCase):
         print(eventList)
 
     ################################################
-    # Test: Single FXFwd - can we show bi-temporal changes?
+    # Test: Single FXFwd bi-temporal audit of an incorrect spot rate
     # Maturity is 3 years
-    # GBPUSD FX fwds, with pips taken from https://www.barchart.com/forex/quotes/%5EGBPUSD/forward-rates
-    # Which are a rough market mid
-    # Spot FX is global, taken from the same site, but adjusted  twice
-    #
+    # An erroneous (fat finger) USDJPY spot is entered.
+    # Even though time elapsed is milliseconds until correction is entered,
+    # LUSID is able to recreate aggregation from both versions of the quote
+    # This is immensely powerful for P&L audit
     # LUSID aggregation in inline, using weighted instruments which are not persisted
 
-    def test_FX_FWD_single_bi_temp(self):
-
-        #set the start and trade date to be 'today' with no time association
-
-        dt = datetime.now()
-
-        trade_date = datetime(dt.year, dt.month, dt.day).replace(tzinfo=pytz.utc)
-
-        start_date = trade_date  # change to spot?
-
-        end_date_3y = start_date.replace(year=start_date.year + 3)
-
-        erroneous_fx = self.start_GBPUSD_FX_price * 1.25
-
-        dom_amount = 100000000
-        # Use mkt fwd to generate close to 0 PV? or use 5y and have over and under
-
-        fwd_FX_price_3y = self.start_GBPUSD_FX_price + self.GBPUSDpip_3y / 10000
-
-        fgn_amount_3y = dom_amount * -fwd_FX_price_3y
-
-         #The market data scope and supplier refer to the user 'scope' into which market data is stored and the supplier
-        #or owner of that data (not the source of it) respectively.
-        #This *must* match the rule that is used to retrieve it or it will not be found.
+    def test_bi_temporal_PV_erroneous_FX(self):
+        # A test that demonstrates how to
+        # (1) Upload sample complex market data to Lusid, namely a pair of curves
+        # (2) Define an fx-forward instrument
+        # (3) Call Lusid to evaluate the Fx-Forward PV and its rates delta
 
         marketDataScope = "TRRiskDomain"
         marketSupplier = 'Lusid'
 
-        # Create a quote for the FX GBP/USD for today, firstly with the erroneous FX (record the time)
+        trade_date = datetime.today().replace(tzinfo=pytz.utc)
+        start_date = trade_date
+        effectiveAt = start_date
 
+        end_date_12m = start_date.replace(year=start_date.year + 1)
+
+        dom_amount = 100000000
+        fgn_amount_12m = dom_amount * -(self.start_USDJPY_FX_price - self.USDJPYpip_12m / 100)
+
+        # set an erroneous FX rate
+
+        erroneous_FX = self.start_USDJPY_FX_price * 1.25
+
+        # first, by mistake we save the erroneous FX rate as the real one
+        # Create a quote for the FX USD/JPY for effective date
         FX_quote = models.UpsertQuoteRequest(
             quote_id=models.QuoteId(
                 quote_series_id=models.QuoteSeriesId(
                     provider=marketSupplier,
-                    instrument_id="GBP/USD",
+                    instrument_id="USD/JPY",
                     instrument_id_type='CurrencyPair',
                     quote_type='Price',
                     field='mid'),
-                effective_at=start_date,
+                effective_at=effectiveAt,
             ),
             metric_value=models.MetricValue(
-                value=erroneous_fx,
+                value=erroneous_FX,
                 unit='rate'),
             lineage='InternalSystem')
 
@@ -961,22 +982,25 @@ class Valuation(unittest.TestCase):
         response = self.quotes_api.upsert_quotes(
             scope=marketDataScope,
             quotes={"1": FX_quote})
+
+        # let's capture the as at time to show we can retrieve the result later
 
         added_quote_time1 = response.values['1']._as_at
 
-        # Create a quote for the FX GBP/USD for today, and now with the correct FX (again, record the time)
+        # now we spot the error and correct
+        # Create a quote for the FX USD/JPY for effective date
         FX_quote = models.UpsertQuoteRequest(
             quote_id=models.QuoteId(
                 quote_series_id=models.QuoteSeriesId(
                     provider=marketSupplier,
-                    instrument_id="GBP/USD",
+                    instrument_id="USD/JPY",
                     instrument_id_type='CurrencyPair',
                     quote_type='Price',
                     field='mid'),
-                effective_at=start_date,
+                effective_at=effectiveAt,
             ),
             metric_value=models.MetricValue(
-                value=self.start_GBPUSD_FX_price,
+                value=self.start_USDJPY_FX_price,
                 unit='rate'),
             lineage='InternalSystem')
 
@@ -985,48 +1009,46 @@ class Valuation(unittest.TestCase):
             scope=marketDataScope,
             quotes={"1": FX_quote})
 
+        # let's save this as at  time too
         added_quote_time2 = response.values['1']._as_at
-
-
-
-        instrument_definition_3y = models.FxForwardInstrument(
+        instrument_definition_12m = models.FxForwardInstrument(
             dom_amount=dom_amount,
-            fgn_amount=-fgn_amount_3y,
+            fgn_amount=-fgn_amount_12m,
             is_ndf=False,
             fixing_date=trade_date.isoformat(),
-            fgn_ccy="USD",
-            ref_spot_rate=self.start_GBPUSD_FX_price,
-            start_date=start_date.isoformat(),
-            maturity_date=end_date_3y.isoformat(),
-            dom_ccy="GBP",
+            fgn_ccy="JPY",
+            ref_spot_rate=self.start_USDJPY_FX_price,
+            start_date=effectiveAt.isoformat(),
+            maturity_date=end_date_12m.isoformat(),
+            dom_ccy="USD",
             instrument_type="FxForward")
 
-        print(response)
-
-        vendorModel=[]
-
-        vendorModel.append(models.VendorModelRule(supplier="RefinitivQps", model_name="VendorDefault",
-                                             instrument_type="FxForward", parameters="{}"))
-
-        # vendorModel.append(models.VendorModelRule(supplier="RefinitivTracsWeb", model_name="VendorDefault",
-        #                                      instrument_type="FxForward", parameters="{}"))
-        #
-        # vendorModel.append(models.VendorModelRule(supplier="VolMaster", model_name="VendorDefault",
-        #                                      instrument_type="FxForward", parameters="{}"))
-
-        weightedInstrumentFXFwd_3y = models.WeightedInstrument(quantity=1, holding_identifier="myholding3y",
-                                                            instrument=instrument_definition_3y)
-
-        weightedInstrumentList = [weightedInstrumentFXFwd_3y] #, weightedInstrumentFXFwd_5y, weightedInstrumentFXFwd_10y]
-
-
-        pricingContext = models.PricingContext(model_rules=vendorModel)
+        pricingContext = models.PricingContext(
+            options=models.PricingOptions(produce_separate_result_for_linear_otc_legs=False),
+            model_rules=[
+                models.VendorModelRule(supplier="Lusid", model_name="SimpleStatic", instrument_type="FxForward",
+                                       parameters="{}")
+            ]
+        )
         marketContext = models.MarketContext(
-            options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope))
-
+            options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope),
+            market_rules=[
+                models.MarketDataKeyRule(key="Fx.*.*", data_scope=marketDataScope, supplier=marketSupplier,
+                                         quote_type='Price', field='mid'),
+                models.MarketDataKeyRule(key="Rates.*.*", data_scope=marketDataScope, supplier=marketSupplier,
+                                         quote_type='Rate', field='mid')
+            ]
+        )
         RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext, market=marketContext)
 
-        aggregationRequestResource = models.AggregationRequest(
+        weightedInstrumentFXFwd_12m = models.WeightedInstrument(quantity=1,
+                                                                holding_identifier="myholding12m",
+                                                                instrument=instrument_definition_12m)
+        weightedInstrumentList = [weightedInstrumentFXFwd_12m]
+
+        # let's call the aggregation twice, to prove that we can see the erroneous PV and the correct PV
+
+        aggregationRequestResource_erroneous = models.AggregationRequest(
             inline_recipe=RecipeId,
             effective_at=start_date.isoformat(),
             as_at=added_quote_time1.isoformat(),
@@ -1034,28 +1056,13 @@ class Valuation(unittest.TestCase):
                 models.AggregateSpec(key='Analytic/default/ValuationDate',
                                      op='Value'),
                 models.AggregateSpec(key='Holding/default/PV',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/DomCcy',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/FgnCcy',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/StartDate',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/MaturityDate',
                                      op='Value')
             ]
         )
-        inlineRequestFXFwd = models.InlineAggregationRequest(request=aggregationRequestResource,
-                                                             instruments=weightedInstrumentList)
+        inlineRequestFXFwd_erroneous = models.InlineAggregationRequest(request=aggregationRequestResource_erroneous,
+                                                                       instruments=weightedInstrumentList)
 
-        # Call LUSID to perform the aggregation
-
-        response = self.aggregation_api.get_aggregation_of_weighted_instruments(marketDataScope,
-                                                                                inline_request=inlineRequestFXFwd)
-
-        print(response)
-
-        aggregationRequestResource = models.AggregationRequest(
+        aggregationRequestResource_correct = models.AggregationRequest(
             inline_recipe=RecipeId,
             effective_at=start_date.isoformat(),
             as_at=added_quote_time2.isoformat(),
@@ -1063,38 +1070,29 @@ class Valuation(unittest.TestCase):
                 models.AggregateSpec(key='Analytic/default/ValuationDate',
                                      op='Value'),
                 models.AggregateSpec(key='Holding/default/PV',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/DomCcy',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/FgnCcy',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/StartDate',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/MaturityDate',
                                      op='Value')
             ]
         )
-        inlineRequestFXFwd = models.InlineAggregationRequest(request=aggregationRequestResource,
-                                                             instruments=weightedInstrumentList)
+        inlineRequestFXFwd_correct = models.InlineAggregationRequest(request=aggregationRequestResource_correct,
+                                                                     instruments=weightedInstrumentList)
 
-        # Call LUSID again, to perform the aggregation with the latter asat time
+        # Call LUSID to perform the aggregation
 
         response = self.aggregation_api.get_aggregation_of_weighted_instruments(marketDataScope,
-                                                                                inline_request=inlineRequestFXFwd)
-
+                                                                                inline_request=inlineRequestFXFwd_erroneous)
         print(response)
-
-
+        print("erroneous as at", added_quote_time1)
+        response = self.aggregation_api.get_aggregation_of_weighted_instruments(marketDataScope,
+                                                                                inline_request=inlineRequestFXFwd_correct)
+        print(response)
+        print("corrected as at", added_quote_time2)
 
     ################################################
     # Test: Show fwd cashflows from a set of 9 aged FXFwds
     # Maturity for all is in the next few days
-    # USDJPY FX fwds, with pips taken from https://www.barchart.com/forex/quotes/%5EUSDJPY/forward-rates
-    # Which are a rough market mid
-    # Spot FX is global, taken from the same site
     # NB there are cash amounts in the slices unlike options, where the cash is unknown
     # and there is nothing in NextEvent, because known cashflows are not regarded as events
-    # Models tested - LUSID
+    # Therefore cash amounts can be aggregated
     # LUSID aggregation in inline, using weighted instruments which are not persisted
 
     def test_FXFwd_expiry_schedule(self):
@@ -1341,6 +1339,15 @@ class Valuation(unittest.TestCase):
 
         print(eventList)
 
+    ################################################
+    # Test: Show 10yr IRS cashflows
+    # Maturity 10y, semi bond 6s EUR IRS
+    # Test will only show (for now) known (set) cashflows
+    # NB there are cash amounts in the slices unlike options, where the cash is unknown
+    # and there is nothing in NextEvent, because known cashflows are not regarded as events
+    # Models tested - LUSID
+    # LUSID aggregation in inline, using weighted instruments which are not persisted
+
     def test_IRS_schedule(self):
 
         marketDataScope = "TRRiskDomain"
@@ -1355,20 +1362,25 @@ class Valuation(unittest.TestCase):
         swapCCY = "EUR"
 
         dom_amount = 75000000
+
+        #create the flow convention for each leg
+
         flow_conventionFixed= models.FlowConventions(
             currency="EUR",
             payment_frequency=models.Tenor(value=6,unit="M"),
             day_count_basis="ThirtyU360",
             roll_convention="ModifiedFollowing",
-            holiday_calendars=None
+            holiday_calendars=""
         )
         flow_conventionFloat = models.FlowConventions(
             currency="EUR",
             payment_frequency=models.Tenor(value=6, unit="M"),
             day_count_basis="Act360",
             roll_convention="ModifiedFollowing",
-            holiday_calendars=None
+            holiday_calendars=""
         )
+
+        # create the swap legs themselves
 
         #irs_legs=[]
         instrument_definition_leg1 = models.Leg(
@@ -1388,6 +1400,7 @@ class Valuation(unittest.TestCase):
             instrument_definition_leg2
         ]
 
+        #create the swap
         instrument_definition_10yEURIRS = models.SwapInstrument(
             start_date=start_date.isoformat(),
             maturity_date=end_date_10y.isoformat(),
@@ -1430,22 +1443,139 @@ class Valuation(unittest.TestCase):
         response = self.aggregation_api.get_aggregation_of_weighted_instruments(marketDataScope,
                                                                                 inline_request=inlineRequestFXFwd)
 
-        cf2 = defaultdict(float)
+        print(response)
 
-        # for options we should see nonsense cashflows
-        for i in response.data:
-            (dt, dtv) = next(iter(i['Analytic/default/HoldingCashflows']['slices']['USD']['labelsY'].items()))
-            (cash, v2) = next(iter(i['Analytic/default/HoldingCashflows']['slices']['USD']['values'].items()))
-            cf2[dt] += v2
-        print(cf2)
+    def test_FXforward_price_from_portfolio_and_roll(self):
+        # A test that demonstrates how to
 
-        # or check for nextEventType = Exercise and collect nextEvent dates as a unique set
-        eventList = set()
-        for i in response.data:
-            if i['Analytic/default/NextEventType'] == "Exercise":
-                eventList.add(i['Analytic/default/NextEvent'])
+        marketDataScope = "TRRiskDomain"
+        marketSupplier = 'Lusid'
+        transactionScope = "Finbourne-Examples"
+        transactionPortfolio = "Global-Equity2"
 
-        print(eventList)
+
+
+        fx_transactions = pd.read_csv('data_7-txn.csv')
+        fx_transactions["fund_code"] = transactionPortfolio
+        mapping = {
+            "transactions": {
+                "identifier_mapping": {
+                    "Instrument/default/Currency": "txn_instrument_id",
+
+                },
+                "required": {
+                    "code": "fund_code",
+                    "transaction_id": "txn_id",
+                    "type": "txn_type",
+                    "transaction_price.price": "txn_price",
+                    "transaction_price.type": "$Price",
+                    "total_consideration.amount": "txn_consideration",
+                    "units": "txn_units",
+                    "transaction_date": "txn_trade_date",
+                    "total_consideration.currency": "sm_currency",
+                    "settlement_date": "txn_settle_date"
+                },
+                "optional": {
+                    "source": "$lusid_security_services",
+                    "exchange_rate": "exchange_rate",
+                },
+                "properties": [
+                    "PortionClass",
+                    "PortionSubClass",
+                    "PortionRegion",
+                ]
+            },
+
+        }
+
+        result = lpt.cocoon.load_from_data_frame(
+            api_factory=self.api_factory,
+            scope=transactionScope,
+            data_frame=fx_transactions,
+            mapping_required=mapping["transactions"]["required"],
+            mapping_optional=mapping["transactions"]["optional"],
+            file_type="transactions",
+            identifier_mapping=mapping["transactions"]["identifier_mapping"],
+            property_columns=mapping["transactions"]["properties"],
+            properties_scope=transactionScope
+        )
+
+        succ, failed = format_transactions_response(result)
+        print(f"number of successful portfolios requests: {len(succ)}")
+        print(f"number of failed portfolios requests    : {len(failed)}")
+
+
+
+        trade_date = datetime.today().replace(tzinfo=pytz.utc)
+        start_date = trade_date
+        effectiveAt = start_date
+
+        marketDataScope = "FinbourneMarketData"
+        marketSupplier = 'Lusid'
+
+        # Create a quote for spot FX GBP/USD
+        FX_quote = models.UpsertQuoteRequest(
+            quote_id=models.QuoteId(
+                quote_series_id=models.QuoteSeriesId(
+                    provider=marketSupplier,
+                    instrument_id="EUR/GBP",
+                    instrument_id_type='CurrencyPair',
+                    quote_type='Price',
+                    field='mid'),
+                effective_at=start_date,
+            ),
+            metric_value=models.MetricValue(
+                value=self.start_EURGBP_FX_price,
+                unit='rate'),
+            lineage='InternalSystem')
+
+        # Call LUSID to upsert the quote
+        response = self.quotes_api.upsert_quotes(
+            scope=marketDataScope,
+            quotes={"1": FX_quote})
+
+
+
+        pricingContext = models.PricingContext(
+            options=models.PricingOptions(produce_separate_result_for_linear_otc_legs=False),
+            model_rules=[
+                models.VendorModelRule(supplier="Lusid", model_name="SimpleStatic", instrument_type="FxForward",
+                                       parameters="{}")
+            ]
+        )
+        marketContext = models.MarketContext(
+            options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope),
+            market_rules=[
+                models.MarketDataKeyRule(key="Fx.*.*", data_scope=marketDataScope, supplier=marketSupplier,
+                                         quote_type='Price', field='mid'),
+                models.MarketDataKeyRule(key="Rates.*.*", data_scope=marketDataScope, supplier=marketSupplier,
+                                         quote_type='Rate', field='mid')
+            ]
+        )
+        RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext, market=marketContext)
+
+        # Create the aggregation request
+        aggregationRequest = models.AggregationRequest(
+            inline_recipe=RecipeId,
+            effective_at=start_date.isoformat(),
+            metrics=[
+                models.AggregateSpec(key='Analytic/default/ValuationDate',
+                                     op='Value'),
+                models.AggregateSpec(key='Holding/default/PV',
+                                     op='Value')
+            ])
+
+        # Call LUSID to perform the aggregation
+        response = self.aggregation_api.get_aggregation_by_portfolio(
+            scope=transactionScope,
+            code=transactionPortfolio,
+            request=aggregationRequest)
+        aggregateOfForwards =0
+        for i in range(len(response.data)):
+            aggregateOfForwards += response.data[i]['Holding/default/PV']
+
+
+        print(aggregateOfForwards)
 
     ################################################
     def test_FX_FWD_CUTDOWN_aggregation_inline_weighted(self):
@@ -2457,46 +2587,48 @@ class Valuation(unittest.TestCase):
         print(response)
 
 
-    def test_bi_temporal_PV_erroneous_FX(self):
-        # A test that demonstrates how to
-        #(1) Upload sample complex market data to Lusid, namely a pair of curves
-        #(2) Define an fx-forward instrument
-        #(3) Call Lusid to evaluate the Fx-Forward PV and its rates delta
+    def test_FX_FWD_single_bi_temp(self):
+
+        #set the start and trade date to be 'today' with no time association
+
+        dt = datetime.now()
+
+        trade_date = datetime(dt.year, dt.month, dt.day).replace(tzinfo=pytz.utc)
+
+        start_date = trade_date  # change to spot?
+
+        end_date_3y = start_date.replace(year=start_date.year + 3)
+
+        erroneous_fx = self.start_GBPUSD_FX_price * 1.25
+
+        dom_amount = 100000000
+        # Use mkt fwd to generate close to 0 PV? or use 5y and have over and under
+
+        fwd_FX_price_3y = self.start_GBPUSD_FX_price + self.GBPUSDpip_3y / 10000
+
+        fgn_amount_3y = dom_amount * -fwd_FX_price_3y
+
+         #The market data scope and supplier refer to the user 'scope' into which market data is stored and the supplier
+        #or owner of that data (not the source of it) respectively.
+        #This *must* match the rule that is used to retrieve it or it will not be found.
 
         marketDataScope = "TRRiskDomain"
         marketSupplier = 'Lusid'
 
-        trade_date = datetime.today().replace(tzinfo=pytz.utc)
-        start_date = trade_date
-        effectiveAt = start_date
+        # Create a quote for the FX GBP/USD for today, firstly with the erroneous FX (record the time)
 
-        end_date_12m = start_date.replace(year=start_date.year + 1)
-
-        ccyList=['USD', 'JPY']
-
-        response = self.create_structure_market_data(ccyList,effectiveAt, marketDataScope)
-
-        dom_amount = 100000000
-        fgn_amount_12m = dom_amount * -(self.start_USDJPY_FX_price - self.USDJPYpip_12m / 100)
-
-        #set an erroneous FX rate
-
-        erroneous_FX= self.start_USDJPY_FX_price * 1.25
-
-        #first, by mistake we save the erroneous FX rate as the real one
-        # Create a quote for the FX USD/JPY for effective date
         FX_quote = models.UpsertQuoteRequest(
             quote_id=models.QuoteId(
                 quote_series_id=models.QuoteSeriesId(
                     provider=marketSupplier,
-                    instrument_id="USD/JPY",
+                    instrument_id="GBP/USD",
                     instrument_id_type='CurrencyPair',
                     quote_type='Price',
                     field='mid'),
-                effective_at=effectiveAt,
+                effective_at=start_date,
             ),
             metric_value=models.MetricValue(
-                value=erroneous_FX,
+                value=erroneous_fx,
                 unit='rate'),
             lineage='InternalSystem')
 
@@ -2504,25 +2636,22 @@ class Valuation(unittest.TestCase):
         response = self.quotes_api.upsert_quotes(
             scope=marketDataScope,
             quotes={"1": FX_quote})
-
-        #let's capture the as at time to show we can retrieve the result later
 
         added_quote_time1 = response.values['1']._as_at
 
-        #now we spot the error and correct
-        # Create a quote for the FX USD/JPY for effective date
+        # Create a quote for the FX GBP/USD for today, and now with the correct FX (again, record the time)
         FX_quote = models.UpsertQuoteRequest(
             quote_id=models.QuoteId(
                 quote_series_id=models.QuoteSeriesId(
                     provider=marketSupplier,
-                    instrument_id="USD/JPY",
+                    instrument_id="GBP/USD",
                     instrument_id_type='CurrencyPair',
                     quote_type='Price',
                     field='mid'),
-                effective_at=effectiveAt,
+                effective_at=start_date,
             ),
             metric_value=models.MetricValue(
-                value=self.start_USDJPY_FX_price,
+                value=self.start_GBPUSD_FX_price,
                 unit='rate'),
             lineage='InternalSystem')
 
@@ -2531,45 +2660,48 @@ class Valuation(unittest.TestCase):
             scope=marketDataScope,
             quotes={"1": FX_quote})
 
-        #let's save this as at  time too
         added_quote_time2 = response.values['1']._as_at
-        instrument_definition_12m = models.FxForwardInstrument(
+
+
+
+        instrument_definition_3y = models.FxForwardInstrument(
             dom_amount=dom_amount,
-            fgn_amount=-fgn_amount_12m,
+            fgn_amount=-fgn_amount_3y,
             is_ndf=False,
             fixing_date=trade_date.isoformat(),
-            fgn_ccy="JPY",
-            ref_spot_rate=self.start_USDJPY_FX_price,
-            start_date=effectiveAt.isoformat(),
-            maturity_date=end_date_12m.isoformat(),
-            dom_ccy="USD",
+            fgn_ccy="USD",
+            ref_spot_rate=self.start_GBPUSD_FX_price,
+            start_date=start_date.isoformat(),
+            maturity_date=end_date_3y.isoformat(),
+            dom_ccy="GBP",
             instrument_type="FxForward")
 
-        pricingContext = models.PricingContext(
-            options=models.PricingOptions(produce_separate_result_for_linear_otc_legs=False),
-            model_rules=[
-                models.VendorModelRule(supplier="Lusid", model_name="Discounting", instrument_type="FxForward",
-                                       parameters="{}")
-            ]
-        )
+        print(response)
+
+        vendorModel=[]
+
+        vendorModel.append(models.VendorModelRule(supplier="RefinitivQps", model_name="VendorDefault",
+                                             instrument_type="FxForward", parameters="{}"))
+
+        # vendorModel.append(models.VendorModelRule(supplier="RefinitivTracsWeb", model_name="VendorDefault",
+        #                                      instrument_type="FxForward", parameters="{}"))
+        #
+        # vendorModel.append(models.VendorModelRule(supplier="VolMaster", model_name="VendorDefault",
+        #                                      instrument_type="FxForward", parameters="{}"))
+
+        weightedInstrumentFXFwd_3y = models.WeightedInstrument(quantity=1, holding_identifier="myholding3y",
+                                                            instrument=instrument_definition_3y)
+
+        weightedInstrumentList = [weightedInstrumentFXFwd_3y] #, weightedInstrumentFXFwd_5y, weightedInstrumentFXFwd_10y]
+
+
+        pricingContext = models.PricingContext(model_rules=vendorModel)
         marketContext = models.MarketContext(
-            options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope),
-            market_rules=[
-                models.MarketDataKeyRule(key="Fx.*.*", data_scope=marketDataScope, supplier=marketSupplier,
-                                         quote_type='Price', field='mid'),
-                models.MarketDataKeyRule(key="Rates.*.*", data_scope=marketDataScope, supplier=marketSupplier,
-                                         quote_type='Rate', field='mid')
-            ]
-        )
+            options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope))
+
         RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext, market=marketContext)
 
-        weightedInstrumentFXFwd_12m = models.WeightedInstrument(quantity=dom_amount, holding_identifier="myholding12m",
-                                                               instrument=instrument_definition_12m)
-        weightedInstrumentList = [weightedInstrumentFXFwd_12m]
-
-        #let's call the aggregation twice, to prove that we can see the erroneous PV and the correct PV
-
-        aggregationRequestResource_erroneous = models.AggregationRequest(
+        aggregationRequestResource = models.AggregationRequest(
             inline_recipe=RecipeId,
             effective_at=start_date.isoformat(),
             as_at=added_quote_time1.isoformat(),
@@ -2577,13 +2709,28 @@ class Valuation(unittest.TestCase):
                 models.AggregateSpec(key='Analytic/default/ValuationDate',
                                      op='Value'),
                 models.AggregateSpec(key='Holding/default/PV',
+                                     op='Value'),
+                models.AggregateSpec(key='Analytic/default/DomCcy',
+                                     op='Value'),
+                models.AggregateSpec(key='Analytic/default/FgnCcy',
+                                     op='Value'),
+                models.AggregateSpec(key='Analytic/default/StartDate',
+                                     op='Value'),
+                models.AggregateSpec(key='Analytic/default/MaturityDate',
                                      op='Value')
             ]
         )
-        inlineRequestFXFwd_erroneous = models.InlineAggregationRequest(request=aggregationRequestResource_erroneous,
+        inlineRequestFXFwd = models.InlineAggregationRequest(request=aggregationRequestResource,
                                                              instruments=weightedInstrumentList)
 
-        aggregationRequestResource_correct = models.AggregationRequest(
+        # Call LUSID to perform the aggregation
+
+        response = self.aggregation_api.get_aggregation_of_weighted_instruments(marketDataScope,
+                                                                                inline_request=inlineRequestFXFwd)
+
+        print(response)
+
+        aggregationRequestResource = models.AggregationRequest(
             inline_recipe=RecipeId,
             effective_at=start_date.isoformat(),
             as_at=added_quote_time2.isoformat(),
@@ -2591,19 +2738,24 @@ class Valuation(unittest.TestCase):
                 models.AggregateSpec(key='Analytic/default/ValuationDate',
                                      op='Value'),
                 models.AggregateSpec(key='Holding/default/PV',
+                                     op='Value'),
+                models.AggregateSpec(key='Analytic/default/DomCcy',
+                                     op='Value'),
+                models.AggregateSpec(key='Analytic/default/FgnCcy',
+                                     op='Value'),
+                models.AggregateSpec(key='Analytic/default/StartDate',
+                                     op='Value'),
+                models.AggregateSpec(key='Analytic/default/MaturityDate',
                                      op='Value')
             ]
         )
-        inlineRequestFXFwd_correct = models.InlineAggregationRequest(request=aggregationRequestResource_correct,
+        inlineRequestFXFwd = models.InlineAggregationRequest(request=aggregationRequestResource,
                                                              instruments=weightedInstrumentList)
 
-        # Call LUSID to perform the aggregation
+        # Call LUSID again, to perform the aggregation with the latter asat time
 
         response = self.aggregation_api.get_aggregation_of_weighted_instruments(marketDataScope,
-                                                                                inline_request=inlineRequestFXFwd_erroneous)
+                                                                                inline_request=inlineRequestFXFwd)
+
         print(response)
-        print ( "erroneous as at", added_quote_time1)
-        response = self.aggregation_api.get_aggregation_of_weighted_instruments(marketDataScope,
-                                                                                inline_request=inlineRequestFXFwd_correct)
-        print(response)
-        print("corrected as at", added_quote_time2)
+
