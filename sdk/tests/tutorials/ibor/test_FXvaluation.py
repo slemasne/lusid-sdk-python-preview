@@ -1534,8 +1534,10 @@ class Valuation(unittest.TestCase):
             scope=marketDataScope,
             quotes={"1": FX_quote})
 
-
-
+        ResourceId = models.ResourceId(
+            scope='default',
+            code='refinitiv-qps'
+        )
         pricingContext = models.PricingContext(
             options=models.PricingOptions(produce_separate_result_for_linear_otc_legs=False),
             model_rules=[
@@ -1556,7 +1558,8 @@ class Valuation(unittest.TestCase):
 
         # Create the aggregation request
         aggregationRequest = models.AggregationRequest(
-            inline_recipe=RecipeId,
+            #inline_recipe=RecipeId,
+            recipe_id=ResourceId,
             effective_at=start_date.isoformat(),
             metrics=[
                 models.AggregateSpec(key='Analytic/default/ValuationDate',
