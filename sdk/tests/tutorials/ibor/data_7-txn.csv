@@ -1,0 +1,5 @@
+﻿fund_code,fund_name,fund_description,fund_baseccy,txn_id,txn_type,txn_trade_date,txn_settle_date,txn_units,txn_price,txn_consideration,exchange_rate,txn_instrument_id,PortionClass,PortionSubClass,PortionRegion,sm_instrument_type,sm_name,sm_sedol,sm_ticker,sm_currency
+FUND_A,Test fund A,Multi-asset fund for test transactions,GBP,trd_0001FX,FwdFxSell,14/01/2019,16/03/2020,1000000,1,840000,0.84,EUR,GovernmentBonds,None,None,Cash,FX Forward,,,GBP
+FUND_A,Test fund A,Multi-asset fund for test transactions,GBP,trd_0002FX,FwdFxSell,14/01/2019,16/03/2020,4000000,1,3360000,0.84,EUR,GovernmentBonds,None,None,Cash,FX Forward,,,GBP
+FUND_A,Test fund A,Multi-asset fund for test transactions,GBP,trd_0003FX,FwdFxSell,14/01/2019,16/03/2020,1000000,1,840000,0.84,EUR,Equities,Listed Equities,Europe,Cash,FX Forward,,,GBP
+FUND_A,Test fund A,Multi-asset fund for test transactions,GBP,trd_0004FX,FxSell,14/01/2020,16/01/2020,3000000,1,21428.571,0.007142857,JPY,Equities,Listed Equities,Japan and developed Asia,Cash,FX Forward,,,GBP
