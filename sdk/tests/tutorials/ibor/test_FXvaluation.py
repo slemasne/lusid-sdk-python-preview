@@ -34,14 +34,14 @@ class Valuation(unittest.TestCase):
         cls.aggregation_api = lusid.AggregationApi(cls.api_client)
         cls.quotes_api = lusid.QuotesApi(cls.api_client)
         cls.SMD_api = lusid.StructuredMarketDataApi(cls.api_client)
-        cls.start_GBPUSD_FX_price = 1.2999
+        cls.start_GBPUSD_FX_price = 1.3044
         cls.start_USDJPY_FX_price = 109.106
         cls.start_EURGBP_FX_price = 0.84247
 
-        cls.GBPUSDpip_1y = 135
-        cls.GBPUSDpip_2y = 235
-        cls.GBPUSDpip_3y = 325
-        cls.GBPUSDpip_5y = 519
+        cls.GBPUSDpip_1y = 119
+        cls.GBPUSDpip_2y = 209
+        cls.GBPUSDpip_3y = 302
+        cls.GBPUSDpip_5y = 489
         cls.GBPUSDpip_10y = 1100
         cls.USDJPYpip_3m = 53
         cls.USDJPYpip_6m = 107
@@ -1368,28 +1368,28 @@ class Valuation(unittest.TestCase):
         flow_conventionFixed= models.FlowConventions(
             currency="EUR",
             payment_frequency=models.Tenor(value=6,unit="M"),
-            day_count_basis="ThirtyU360",
+            day_count_convention="ThirtyU360",
             roll_convention="ModifiedFollowing",
-            holiday_calendars=""
+            holiday_calendars=[]
         )
         flow_conventionFloat = models.FlowConventions(
             currency="EUR",
             payment_frequency=models.Tenor(value=6, unit="M"),
-            day_count_basis="Act360",
+            day_count_convention="Act360",
             roll_convention="ModifiedFollowing",
-            holiday_calendars=""
+            holiday_calendars=[]
         )
 
         # create the swap legs themselves
 
         #irs_legs=[]
-        instrument_definition_leg1 = models.Leg(
+        instrument_definition_leg1 = models.InstrumentLeg(
             conventions=flow_conventionFixed,
             is_pay_not_receive=True,
             is_float_not_fixed=False,
             fixed_rate=0.01
         )
-        instrument_definition_leg2 = models.Leg(
+        instrument_definition_leg2 = models.InstrumentLeg(
             conventions=flow_conventionFloat,
             is_pay_not_receive=False,
             is_float_not_fixed=True,
@@ -1407,7 +1407,7 @@ class Valuation(unittest.TestCase):
             notional=dom_amount,
             legs=irs_legs,
             is_amortizing=False,
-            notional_exchange="None",
+            notional_exchange_type="None",
             instrument_type="InterestRateSwap")
 
         pricingContext = models.PricingContext(
@@ -1445,18 +1445,38 @@ class Valuation(unittest.TestCase):
 
         print(response)
 
+    ################################################
+    # Test: Demonstrate the process of rolling FXFwds
+    # We take 3 fx forwards, upsert them as fwd cash transactions in a different base and transaction ccy (to mimick FXFwds)
+    # Then price using LUSID and QPS.
+    # Then we tearup and book new fx positions.
+    # This script uses cocoon for mapping
     def test_FXforward_price_from_portfolio_and_roll(self):
-        # A test that demonstrates how to
 
-        marketDataScope = "TRRiskDomain"
-        marketSupplier = 'Lusid'
+
         transactionScope = "Finbourne-Examples"
-        transactionPortfolio = "Global-Equity2"
+        transactionPortfolio = "Test15"
+        spotGBPEUR = 1.2021
+        portfolioRequest = models.CreateTransactionPortfolioRequest(
+            display_name="test portfolio",
+            code=transactionPortfolio,
+            description="to test FX rolls",
+            base_currency="GBP",
+            created=datetime(2019, 1, 1, tzinfo=pytz.utc)
+        )
+        try:
+            self.transaction_portfolios_api.create_portfolio(transactionScope, portfolioRequest)
+        except:
+            pass  # will fail on subsequent runs..
 
 
-
-        fx_transactions = pd.read_csv('data_7-txn.csv')
+        fx_transactions = pd.read_csv('txn.csv')
         fx_transactions["fund_code"] = transactionPortfolio
+        sum_units = sum(fx_transactions["txn_units"])
+        sum_consideration = sum(fx_transactions["txn_consideration"])
+        max_settle = max(fx_transactions["txn_settle_date"])
+        txn_ids = fx_transactions.loc[:,"txn_id"]
+
         mapping = {
             "transactions": {
                 "identifier_mapping": {
@@ -1510,22 +1530,28 @@ class Valuation(unittest.TestCase):
         start_date = trade_date
         effectiveAt = start_date
 
+        # use the duration of the remaining FX forwards and the total notional to calculate
+        # a rough pv01. lets assume a 5bps charge for the tearup
+        duration = (datetime.strptime(max_settle,"%d/%m/%Y") - (start_date.replace(tzinfo=None))).days/365.25
+        approx_pv01 = sum_units*duration/10000
+        charge= 5* approx_pv01
         marketDataScope = "FinbourneMarketData"
         marketSupplier = 'Lusid'
 
-        # Create a quote for spot FX GBP/USD
+        # We are going to need a market quote for the new role fx forward. Let's save that down so that we can retrieve it later
+        # Create a quote for forward FX GBPEUR (saved as a spread, so the forward pips)
         FX_quote = models.UpsertQuoteRequest(
             quote_id=models.QuoteId(
                 quote_series_id=models.QuoteSeriesId(
                     provider=marketSupplier,
-                    instrument_id="EUR/GBP",
+                    instrument_id="GBP/EUR",
                     instrument_id_type='CurrencyPair',
-                    quote_type='Price',
+                    quote_type='Spread',
                     field='mid'),
                 effective_at=start_date,
             ),
             metric_value=models.MetricValue(
-                value=self.start_EURGBP_FX_price,
+                value=146,
                 unit='rate'),
             lineage='InternalSystem')
 
@@ -1534,37 +1560,47 @@ class Valuation(unittest.TestCase):
             scope=marketDataScope,
             quotes={"1": FX_quote})
 
-
+        # There is a saved recipe, accessed via the resource ID that prices using QPS
+        # We can access this by switching from inline recipe to recipe ID in the aggrgation request
         ResourceId = models.ResourceId(
             scope='default',
             code='refinitiv-qps'
         )
+        # this is the construction of an in-lin recipe
+        vendorModel = []
+
+        # vendorModel.append(models.VendorModelRule(supplier="RefinitivQps", model_name="VendorDefault",
+        #                                           instrument_type="FxForward", parameters="{}"))
+        #
+        vendorModel.append(models.VendorModelRule(supplier="VolMaster", model_name="VendorDefault",
+                                                  instrument_type="FxForward", parameters="{}"))
+
+        # vendorModel.append(models.VendorModelRule(supplier="Lusid", model_name="SimpleStatic",
+        #                                           instrument_type="FxBuy", parameters="{}"))
+
+        # vendorModel.append(models.VendorModelRule(supplier="Lusid", model_name="SimpleStatic",
+        #                                           instrument_type="FxCash", parameters="{}"))
 
         pricingContext = models.PricingContext(
-            options=models.PricingOptions(produce_separate_result_for_linear_otc_legs=False),
-            model_rules=[
-                models.VendorModelRule(supplier="Lusid", model_name="SimpleStatic", instrument_type="FxForward",
-                                       parameters="{}")
-            ]
-        )
+            options=models.PricingOptions(produce_separate_result_for_linear_otc_legs=True), #,
+                                          #model_selection=models.ModelSelection(library="Lusid",model="SimpleStatic")),
+
+            model_rules=vendorModel)
+
         marketContext = models.MarketContext(
-            options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope),
-            market_rules=[
-                models.MarketDataKeyRule(key="Fx.*.*", data_scope=marketDataScope, supplier=marketSupplier,
-                                         quote_type='Price', field='mid'),
-                models.MarketDataKeyRule(key="Rates.*.*", data_scope=marketDataScope, supplier=marketSupplier,
-                                         quote_type='Rate', field='mid')
-            ]
-        )
+            options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope))
+
+
         RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext, market=marketContext)
 
         # Create the aggregation request
         aggregationRequest = models.AggregationRequest(
-            #inline_recipe=RecipeId,
-            recipe_id=ResourceId,
-
+            inline_recipe=RecipeId,
+            #recipe_id=ResourceId,
             effective_at=start_date.isoformat(),
             metrics=[
+                models.AggregateSpec(key='Instrument/default/Name',
+                                     op='Value'),
                 models.AggregateSpec(key='Analytic/default/ValuationDate',
                                      op='Value'),
                 models.AggregateSpec(key='Holding/default/PV',
@@ -1576,912 +1612,170 @@ class Valuation(unittest.TestCase):
             scope=transactionScope,
             code=transactionPortfolio,
             request=aggregationRequest)
+
         aggregateOfForwards =0
         for i in range(len(response.data)):
             aggregateOfForwards += response.data[i]['Holding/default/PV']
 
+        # To tearup the current FX forwards, we need the overall PV, and the charge.
+        # The PV is above. A reasonable charge has been calculated as 5bps
+        # So we can cancel the current transactions, provided we book a cash receipt of the PV less the charge
+        # (assuming the PV is +ve, otherwise its a payment)
+
+        cashPayment  = aggregateOfForwards - charge
+
+        # Cancel transactions - nothing is ever deleted from an immutable system
+
+        response = self.transaction_portfolios_api.cancel_transactions(transactionScope, transactionPortfolio, txn_ids.values.tolist())
+
+        # bring in the second file with the new FX forward and the cash txn. we will need to configure these to reflect the market/calculated values
+
+        fx_new_transactions = pd.read_csv('txn_new.csv', dtype={"txn_units": float,"txn_consideration": float})
+        fx_new_transactions["fund_code"] = transactionPortfolio
+
+        # for the  cash payment, we need to adjust the amount. (the csv has a unitised booking)
+        # for the new FX forward, we need to set the FX rate from the spot and the forward quote
+        # for the notional, we are assuming the EUR amount is unchanged and infering the GBP fwd
+
+        # Retrieve the quote for the new 1yr fwd FX
+
+        fwd_pips = self.quotes_api.get_quotes(
+            scope=marketDataScope,
+            effective_at=start_date,
+            quote_ids={
+                'CurrencyPair': models.QuoteSeriesId(
+                    provider=marketSupplier,
+                    instrument_id='GBP/EUR',
+                    instrument_id_type='CurrencyPair',
+                    quote_type='Spread',
+                    field='mid')
+            }).values['CurrencyPair'].metric_value.value
+
+        # The fwd fx and the far GBP leg notional need to be calculated and edited in the file
+        # Of course you could just as easily do this in memory
+
+        fwdFX = spotGBPEUR - fwd_pips/10000
+        # far GBP leg is the far EUR leg / fwdFX
+        farGBPLeg= fx_new_transactions[fx_new_transactions['txn_id']=='trd_FXRoll_01']['txn_consideration'].item() / fwdFX
+
+        fx_new_transactions.loc[fx_new_transactions['txn_id'] == 'trd_FXRoll_01','txn_units']  = farGBPLeg
+        fx_new_transactions.loc[fx_new_transactions['txn_id'] == 'trd_FXRoll_01', 'exchange_rate'] = fwdFX
+        fx_new_transactions.loc[fx_new_transactions['txn_id'] == 'trd_tearup_01', 'txn_consideration'] = cashPayment
+
+
+        # Book the new FX forward ( buying GBPEUR for the sum of the EUR position)
+
+
+
+        mapping = {
+            "transactions": {
+                "identifier_mapping": {
+                    "Instrument/default/Currency": "txn_instrument_id",
+
+                },
+                "required": {
+                    "code": "fund_code",
+                    "transaction_id": "txn_id",
+                    "type": "txn_type",
+                    "transaction_price.price": "txn_price",
+                    "transaction_price.type": "$Price",
+                    "total_consideration.amount": "txn_consideration",
+                    "units": "txn_units",
+                    "transaction_date": "txn_trade_date",
+                    "total_consideration.currency": "sm_currency",
+                    "settlement_date": "txn_settle_date"
+                },
+                "optional": {
+                    "source": "$lusid_security_services",
+                    "exchange_rate": "exchange_rate",
+                },
+                "properties": [
+                    "PortionClass",
+                    "PortionSubClass",
+                    "PortionRegion",
+                ]
+            },
+
+        }
+
+        result = lpt.cocoon.load_from_data_frame(
+            api_factory=self.api_factory,
+            scope=transactionScope,
+            data_frame=fx_new_transactions,
+            mapping_required=mapping["transactions"]["required"],
+            mapping_optional=mapping["transactions"]["optional"],
+            file_type="transactions",
+            identifier_mapping=mapping["transactions"]["identifier_mapping"],
+            property_columns=mapping["transactions"]["properties"],
+            properties_scope=transactionScope
+        )
+
+        succ, failed = format_transactions_response(result)
+        print(f"number of successful portfolios requests: {len(succ)}")
+        print(f"number of failed portfolios requests    : {len(failed)}")
+
+        response = self.transaction_portfolios_api.get_transactions(
+            scope=transactionScope,
+            code=transactionPortfolio,
+            from_transaction_date=start_date)
+        # where are my results.....!!
 
         print(aggregateOfForwards)
 
-    ################################################
-    def test_FX_FWD_CUTDOWN_aggregation_inline_weighted(self):
-        # price simple fx fwds..demonstrate sensible PV.
-        # can update dates etc
-        trade_date = datetime(2020, 1, 9, tzinfo=pytz.utc)  # change to today?
-        start_date = datetime(2020, 1, 11, tzinfo=pytz.utc)  # change to spot?
-        end_date5y = datetime(2025, 1, 11, tzinfo=pytz.utc)  # 5yr
 
-        dom_amount = 100000000
-        fgn_amount_5y = dom_amount * -98.7
-        start_FX_price = 109.935
-
-        # The market data scope and supplier refer to the user 'scope' into which market data is stored and the supplier
-        # or owner of that data (not the source of it) respectively.
-        # This *must* match the rule that is used to retrieve it or it will not be found.
-
-        marketDataScope = "TRRiskDomain"
-        marketSupplier = 'Lusid'
-
-        # Create a quote for the FX GBP/USD for 21/11/19
-        FX_quote = models.UpsertQuoteRequest(
-            quote_id=models.QuoteId(
-                quote_series_id=models.QuoteSeriesId(
-                    provider=marketSupplier,
-                    instrument_id="USD/JPY",
-                    instrument_id_type='CurrencyPair',
-                    quote_type='Price',
-                    field='mid'),
-                effective_at=start_date,
-            ),
-            metric_value=models.MetricValue(
-                value=start_FX_price,
-                unit='rate'),
-            lineage='InternalSystem')
-
-        # Call LUSID to upsert the quote
-        response = self.quotes_api.upsert_quotes(
-            scope=marketDataScope,
-            quotes={"1": FX_quote})
-
-        instrument_definition5y = models.FxForwardInstrument(
-            dom_amount=dom_amount,
-            fgn_amount=-fgn_amount_5y,
-            is_ndf=False,
-            fixing_date=trade_date.isoformat(),
-            fgn_ccy="JPY",
-            ref_spot_rate=start_FX_price,
-            start_date=start_date.isoformat(),
-            maturity_date=end_date5y.isoformat(),
-            dom_ccy="USD",
-            instrument_type="FxForward")
-
-        print(response)
-
-        # vendorModel = models.VendorModelRule(supplier="VolMaster", model_name="VendorDefault",
-        #                                     instrument_type="FxForward", parameters="{}")
-
-        vendorModel = models.VendorModelRule(supplier="RefinitivQps", model_name="VendorDefault",
-                                             instrument_type="FxForward", parameters="{}")
-
-        pricingContext = models.PricingContext(model_rules=[vendorModel])
-        marketContext = models.MarketContext(
-            options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope))
-
-        RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext, market=marketContext)
-
-        weightedInstrumentFXFwd_5y = models.WeightedInstrument(quantity=1, holding_identifier="myholding5y",
-                                                               instrument=instrument_definition5y)
-
-        weightedInstrumentList = [weightedInstrumentFXFwd_5y]
-
-        aggregationRequestResource = models.AggregationRequest(
-            # recipe_id=ResourceId,
-            inline_recipe=RecipeId,
-            effective_at=start_date.isoformat(),
-            metrics=[
-                models.AggregateSpec(key='Analytic/default/ValuationDate',
-                                     op='Value'),
-                models.AggregateSpec(key='Holding/default/PV',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/DomCcy',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/FgnCcy',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/StartDate',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/MaturityDate',
-                                     op='Value')
-            ]
-        )
-        inlineRequestFXFwd = models.InlineAggregationRequest(request=aggregationRequestResource,
-                                                             instruments=weightedInstrumentList)
-
-        # Call LUSID to perform the aggregation
-
-        response = self.aggregation_api.get_aggregation_of_weighted_instruments(marketDataScope,
-                                                                                inline_request=inlineRequestFXFwd)
-        print(response.data[0])
-        print(response)
-
-        print(response)
 
     ################################################
-    # no plans to use this in demo
-    def test_FX_FWD_portfolio_aggregation(self):
-        # not going to demo this until swagger 3
+    # Test: show a variety of instruments, with a set of recipes to price in different ways
+    # Then we show how recipes can supersede each other.
+    # Finally, we wish to show the cashflows being returned from the set of transactions, holdings and instruments
+    # At first, we will do this in-line, then add the ability to upsert the recipes and instruments/transactions
 
-        # price simple fx fwds..demonstrate sensible PV.
-        # can update dates etc
-        trade_date = datetime(2020, 1, 9, tzinfo=pytz.utc)  # change to today?
-        start_date = datetime(2020, 1, 11, tzinfo=pytz.utc)  # change to spot?
-        end_date3y = datetime(2023, 1, 11, tzinfo=pytz.utc)  # 3yr
-        end_date5y = datetime(2025, 1, 11, tzinfo=pytz.utc)  # 5yr
-        end_date10y = datetime(2030, 1, 11, tzinfo=pytz.utc)  # 10yr
+    def test_cashflows_and_recipes_together(self):
 
-        dom_amount = 100000000
-        fgn_amount = -136035000  # Use mkt fwd to generate close to 0 PV? or use 5y and have over and under
-        start_FX_price = 1.30485
+        #create a portfolio to book our cash, otc instruments
+        transactionScope = "Finbourne-Examples"
+        transactionPortfolio = "RecipeTest"
 
-        '''
-            The market data scope and supplier refer to (effectively) two fields in the database that describe who 'supplied' the data 
-            and the user 'scope' into which it is put. This *must* match the rule that is used to retrieve it or it simply will not be found. 
-        '''
-        marketDataScope = "TRRiskDomain"
-        marketSupplier = 'Lusid'
-
-        # Create a quote for the FX GBP/USD for 21/11/19
-        FX_quote = models.UpsertQuoteRequest(
-            quote_id=models.QuoteId(
-                quote_series_id=models.QuoteSeriesId(
-                    provider=marketSupplier,
-                    instrument_id="GBP/USD",
-                    instrument_id_type='CurrencyPair',
-                    quote_type='Price',
-                    field='mid'),
-                effective_at=start_date,
-            ),
-            metric_value=models.MetricValue(
-                value=start_FX_price,
-                unit='rate'),
-            lineage='InternalSystem')
-
-        # Call LUSID to upsert the quote
-        response = self.quotes_api.upsert_quotes(
-            scope=marketDataScope,
-            quotes={"1": FX_quote})
-
-        instrument_definition3y = models.FxForwardInstrument(
-            dom_amount=dom_amount,
-            fgn_amount=-fgn_amount,
-            is_ndf=False,
-            fixing_date=trade_date.isoformat(),
-            fgn_ccy="USD",
-            ref_spot_rate=start_FX_price,
-            start_date=start_date.isoformat(),
-            maturity_date=end_date3y.isoformat(),
-            dom_ccy="GBP",
-            instrument_type="FxForward")
-
-        instrument_definition5y = models.FxForwardInstrument(
-            dom_amount=dom_amount,
-            fgn_amount=-fgn_amount,
-            is_ndf=False,
-            fixing_date=trade_date.isoformat(),
-            fgn_ccy="USD",
-            ref_spot_rate=start_FX_price,
-            start_date=start_date.isoformat(),
-            maturity_date=end_date5y.isoformat(),
-            dom_ccy="GBP",
-            instrument_type="FxForward")
-
-        instrument_definition10y = models.FxForwardInstrument(
-            dom_amount=dom_amount,
-            fgn_amount=-fgn_amount,
-            is_ndf=False,
-            fixing_date=trade_date.isoformat(),
-            fgn_ccy="USD",
-            ref_spot_rate=start_FX_price,
-            start_date=start_date.isoformat(),
-            maturity_date=end_date10y.isoformat(),
-            dom_ccy="GBP",
-            instrument_type="FxForward")
-
-        weightedInstrumentFXFwd3y = models.WeightedInstrument(quantity=1, holding_identifier="myholding3y",
-                                                              instrument=instrument_definition3y)
-
-        weightedInstrumentFXFwd5y = models.WeightedInstrument(quantity=1, holding_identifier="myholding5y",
-                                                              instrument=instrument_definition5y)
-
-        weightedInstrumentFXFwd10y = models.WeightedInstrument(quantity=1, holding_identifier="myholding10y",
-                                                               instrument=instrument_definition10y)
-
-        weightedInstrumentList = [weightedInstrumentFXFwd3y, weightedInstrumentFXFwd5y, weightedInstrumentFXFwd10y]
-
-        # Create the aggregation request
-        aggregationRequest = models.AggregationRequest(
-            # inline_recipe=inline_recipe,
-            recipe_id=ResourceId,
-            effective_at=start_date.isoformat(),
-            metrics=[
-                models.AggregateSpec(key='Analytic/default/ValuationDate',
-                                     op='Value'),
-                models.AggregateSpec(key='Holding/default/PV',
-                                     op='Value')
-            ])
-
-        # Call LUSID to perform the aggregation
-        response = self.aggregation_api.get_aggregation_by_portfolio(
-            scope=scope,
-            code=portfolio,
-            request=aggregationRequest)
-
-        print(response)
-
-    def test_FX_aggregation_all_options(self):
-        trade_date = datetime(2019, 11, 19, tzinfo=pytz.utc)
-        start_date = datetime(2019, 11, 21, tzinfo=pytz.utc)
-        end_date = datetime(2024, 11, 21, tzinfo=pytz.utc)
-        dom_amount = 100000000
-        fgn_amount = -133650000
-        start_FX_price = 1.289
-        optionMatDate = end_date = datetime(2020, 5, 21, tzinfo=pytz.utc)
-        # start_date = datetime(2019, 11, 21, tzinfo=pytz.utc)
-        # end_date = datetime(2019, 11, 22, tzinfo=pytz.utc)
-        # dom_amount = 1000
-        # fgn_amount = -1291.5
-
-        scope = "TRRiskDomain"
-        portfolio = "FXFwd1GBP"
-
-        # Create a quote for the FX GBP/USD for 21/11/19
-        FX_quote = models.UpsertQuoteRequest(
-            quote_id=models.QuoteId(
-                quote_series_id=models.QuoteSeriesId(
-                    provider='Lusid',
-                    instrument_id="GBP/USD",
-                    instrument_id_type='CurrencyPair',
-                    quote_type='Price',
-                    field='mid'),
-                effective_at=start_date,
-            ),
-            metric_value=models.MetricValue(
-                value=start_FX_price,
-                unit='rate'),
-            lineage='InternalSystem')
-
-        # Call LUSID to upsert the quote
-        response = self.quotes_api.upsert_quotes(
-            scope=scope,
-            quotes={"1": FX_quote})
-
-        instrument_definition1 = models.FxForwardInstrument(
-            dom_amount=dom_amount,
-            fgn_amount=-fgn_amount,
-            is_ndf=False,
-            fixing_date=trade_date.isoformat(),
-            fgn_ccy="USD",
-            ref_spot_rate=1.2915,
-            start_date=start_date.isoformat(),
-            maturity_date=end_date.isoformat(),
-            dom_ccy="GBP",
-            instrument_type="FxForward")
-
-        instrument_definition2 = models.FxOption(
-            start_date=start_date,
-            option_maturity_date=optionMatDate,
-            option_settlement_date=start_date,
-            is_delivery_not_cash=False,
-            is_call_not_put=True,
-            strike=100,
-            dom_ccy="GBP",
-            fgn_ccy="USD",
-            instrument_type="FxOption")
-
-        # instrument_definition3 = models.LusidInstrument(instrument_type="FxForward")
-        # print(json.dumps(instrument_definition3.__dict__))
-        FX_FWD_details = {
-            "domAmount": 100000000,
-            "domCcy": 'GBP',
-            "fgnAmount": -128863000,
-            "fgnCcy": 'USD',
-            "fixingDate": start_date.isoformat(),
-            "instrumentType": "FxForward",
-            "isNdf": False,
-            "maturityDate": end_date.isoformat(),
-            "refSpotRate": 1.28863,
-            "startDate": start_date.isoformat()
-        }
-
-        # Create the definition for your instrument, attaching the bespoke contract
-        FX_FWD_instrument = models.InstrumentDefinition(
-            name='FXFWD1',
-            identifiers={
-                'ClientInternal': models.InstrumentIdValue(
-                    value="FXFWD0001", effective_at=start_date.isoformat())},
-            definition=models.InstrumentEconomicDefinition(
-                instrument_format='Lusid',
-                content=json.dumps(FX_FWD_details)
-            )
+        portfolioRequest = models.CreateTransactionPortfolioRequest(
+            display_name="test portfolio",
+            code=transactionPortfolio,
+            description="to test FX rolls",
+            base_currency="GBP",
+            created=datetime(2019, 1, 1, tzinfo=pytz.utc)
         )
-
-        print(json.dumps(FX_FWD_details))
-
-        response = self.instruments_api.upsert_instruments(
-            instruments={"FXsomething": FX_FWD_instrument})
-
-        FX_FWD_details = {
-            "domAmount": 50000000,
-            "domCcy": 'GBP',
-            "fgnAmount": -64431500,
-            "fgnCcy": 'USD',
-            "fixingDate": start_date.isoformat(),
-            "instrumentType": "FxForward",
-            "isNdf": False,
-            "maturityDate": end_date.isoformat(),
-            "refSpotRate": 1.28863,
-            "startDate": start_date.isoformat()
-        }
-
-        # Create the definition for your instrument, attaching the bespoke contract
-        FX_FWD_instrument = models.InstrumentDefinition(
-            name='FXFWD2',
-            identifiers={
-                'ClientInternal': models.InstrumentIdValue(
-                    value="FXFWD0002")},
-            definition=models.InstrumentEconomicDefinition(
-                instrument_format='Lusid',
-                content=json.dumps(FX_FWD_details)
-            )
-        )
-
-        print(json.dumps(FX_FWD_details))
-
-        response = self.instruments_api.upsert_instruments(
-            instruments={"FXsomething1": FX_FWD_instrument})
-
-        self.assertEqual(len(response.values), 1, response.failed)
-
-        # Initialse a list to hold the hedging transaction
-        hedge_transactions = []
-        # Build and add the hedge transaction for this currency to the list of transactions
-        hedge_transactions.append(
-            models.TransactionRequest(
-                transaction_id="TXNFXFWD0001",
-                type='Buy',
-                instrument_identifiers={
-                    'Instrument/default/ClientInternal': "FXFWD0001"},
-                transaction_date=trade_date.isoformat(),
-                settlement_date=start_date.isoformat(),
-                units=1,
-                transaction_price=models.TransactionPrice(
-                    price=0,
-                    type='Price'),
-                total_consideration=models.CurrencyAndAmount(
-                    amount=0,
-                    currency="GBP"),
-                transaction_currency='GBP',
-                source='Client',
-            )
-        )
-        hedge_transactions.append(
-            models.TransactionRequest(
-                transaction_id="TXNFXFWD0002",
-                type='Buy',
-                instrument_identifiers={
-                    'Instrument/default/ClientInternal': "FXFWD0002"},
-                transaction_date=trade_date.isoformat(),
-                settlement_date=start_date.isoformat(),
-                units=1,
-                transaction_price=models.TransactionPrice(
-                    price=0,
-                    type='Price'),
-                total_consideration=models.CurrencyAndAmount(
-                    amount=0,
-                    currency="GBP"),
-                transaction_currency='GBP',
-                source='Client',
-            )
-        )
-        # Upsert the transaction into LUSID
-        response = self.transaction_portfolios_api.upsert_transactions(
-            scope=scope,
-            code=portfolio,
-            transactions=hedge_transactions
-        )
-        print(response)
-        # recipeId = models.ResourceId(scope=scope,code=portfolio)
-        ResourceId = models.ResourceId(
-            scope='default',
-            code='refinitiv-qps'
-        )
-
-        vendorModel = models.VendorModelRule(supplier="VolMaster", model_name="VendorDefault",
-                                             instrument_type="FxOption", parameters="{}")
-        pricingContext = models.PricingContext(model_rules=[vendorModel])
-        RecipeId = models.ConfigurationRecipe(code="volmaster", pricing=pricingContext)
-
-        weightedInstrumentFXFwd = models.WeightedInstrument(quantity=1, holding_identifier="myholding",
-                                                            instrument=instrument_definition1)
-
-        weightedInstrumentFXOpt = models.WeightedInstrument(quantity=1, holding_identifier="myholding",
-                                                            instrument=instrument_definition2)
-
-        aggregationRequestResource = models.AggregationRequest(
-            # recipe_id=ResourceId,
-            inline_recipe=RecipeId,
-            effective_at=start_date.isoformat(),
-            metrics=[
-                models.AggregateSpec(key='Analytic/default/ValuationDate',
-                                     op='Value'),
-                models.AggregateSpec(key='Holding/default/PV',
-                                     op='Value')
-            ]
-        )
-        inlineRequestFXFwd = models.InlineAggregationRequest(request=aggregationRequestResource,
-                                                             instruments=[weightedInstrumentFXFwd])
-
-        # Call LUSID to perform the aggregation
-
-        response = self.aggregation_api.get_aggregation_of_weighted_instruments(scope,
-                                                                                inline_request=inlineRequestFXFwd)
-        print(response.data[0])
-        print(response)
-
-        aggregationRequestInLine = models.AggregationRequest(
-            inline_recipe=RecipeId,
-            effective_at=start_date.isoformat(),
-            metrics=[
-                models.AggregateSpec(key='Analytic/default/ValuationDate',
-                                     op='Value'),
-                models.AggregateSpec(key='Holding/default/PV',
-                                     op='Value')
-            ]
-        )
-        inlineRequestFXOpt = models.InlineAggregationRequest(request=aggregationRequestInLine,
-                                                             instruments=[weightedInstrumentFXOpt])
-
-        response = self.aggregation_api.get_aggregation_of_weighted_instruments(scope,
-                                                                                inline_request=inlineRequestFXOpt)
-        print(response.data[0])
-        print(response)
-
-        # Create the aggregation request
-        aggregationRequest = models.AggregationRequest(
-            # inline_recipe=inline_recipe,
-            recipe_id=ResourceId,
-            effective_at=start_date.isoformat(),
-            metrics=[
-                models.AggregateSpec(key='Analytic/default/ValuationDate',
-                                     op='Value'),
-                models.AggregateSpec(key='Holding/default/PV',
-                                     op='Value')
-            ])
-
-        # Call LUSID to perform the aggregation
-        response = self.aggregation_api.get_aggregation_by_portfolio(
-            scope=scope,
-            code=portfolio,
-            request=aggregationRequest)
-
-        print(response)
-
-    ####################################################
-    def test_FX_OPT_aggregation_inline_weighted_LUSID_event_retrieval(self):
-        # price simple fx opts..demonstrate sensible pvs.
-        # can update dates etc
-        trade_date = datetime.today().replace(tzinfo=pytz.utc)  # change to today for VolMaster
-        start_date = trade_date  # change to spot?
-
-        end_date_1y = start_date.replace(year=start_date.year + 1)  # 1yr
-        end_date_2y = start_date.replace(year=start_date.year + 2)  # 2yr
-        end_date_3y = start_date.replace(year=start_date.year + 3)  # 3yr
-
-        dom_amount = 100000000
-        fgn_amount_1y = -131175000
-        fgn_amount_2y = -132350000
-        fgn_amount_3y = -133900000
-        # Use mkt fwd to generate close to 0 PV? or use 5y and have over and under
-        start_FX_price = 1.2975
-        fwd_FX_price_1y = 1.31175
-        fwd_FX_price_2y = 1.3235
-        fwd_FX_price_3y = 1.339
-        '''
-            The market data scope and supplier refer to (effectively) two fields in the database that describe who 'supplied' the data 
-            and the user 'scope' into which it is put. This *must* match the rule that is used to retrieve it or it simply will not be found. 
-        '''
-        marketDataScope = "TRRiskDomain"
-        marketSupplier = 'Lusid'
-
-        # Create a quote for the FX GBP/USD for 21/11/19
-        FX_quote = models.UpsertQuoteRequest(
-            quote_id=models.QuoteId(
-                quote_series_id=models.QuoteSeriesId(
-                    provider=marketSupplier,
-                    instrument_id="GBP/USD",
-                    instrument_id_type='CurrencyPair',
-                    quote_type='Price',
-                    field='mid'),
-                effective_at=start_date,
-            ),
-            metric_value=models.MetricValue(
-                value=start_FX_price,
-                unit='rate'),
-            lineage='InternalSystem')
-
-        # Call LUSID to upsert the quote
-        response = self.quotes_api.upsert_quotes(
-            scope=marketDataScope,
-            quotes={"1": FX_quote})
-
-        instrument_definition_1y = models.FxOption(
-            start_date=start_date.isoformat(),
-            option_maturity_date=end_date_1y.isoformat(),
-            option_settlement_date=start_date.isoformat(),
-            is_delivery_not_cash=False,
-            is_call_not_put=True,
-            strike=fwd_FX_price_1y,
-            dom_ccy="GBP",
-            fgn_ccy="USD",
-            instrument_type="FxOption"
-        )
-
-        instrument_definition_2y = models.FxOption(
-            start_date=start_date.isoformat(),
-            option_maturity_date=end_date_2y.isoformat(),
-            option_settlement_date=start_date.isoformat(),
-            is_delivery_not_cash=False,
-            is_call_not_put=True,
-            strike=fwd_FX_price_2y,
-            dom_ccy="GBP",
-            fgn_ccy="USD",
-            instrument_type="FxOption"
-        )
-
-        instrument_definition_3y = models.FxOption(
-            start_date=start_date.isoformat(),
-            option_maturity_date=end_date_3y.isoformat(),
-            option_settlement_date=start_date.isoformat(),
-            is_delivery_not_cash=False,
-            is_call_not_put=True,
-            strike=fwd_FX_price_3y,
-            dom_ccy="GBP",
-            fgn_ccy="USD",
-            instrument_type="FxOption"
-        )
-
-        print(response)
-
-        vendorModelQPS = models.VendorModelRule(supplier="RefinitivQps", model_name="VendorDefault",
-                                                instrument_type="FxOption", parameters="{}")
-
-        vendorModelTracs = models.VendorModelRule(supplier="RefinitivTracsWeb", model_name="VendorDefault",
-                                                  instrument_type="FxOption", parameters="{}")
-
-        vendorModelVM = models.VendorModelRule(supplier="VolMaster", model_name="VendorDefault",
-                                               instrument_type="FxOption", parameters="{}")
-
-        vendorModelLD = models.VendorModelRule(supplier="Lusid", model_name="simpleStatic",
-                                               instrument_type="FxOption", parameters="{}")
-
-        vendorModel = vendorModelTracs
-
-        pricingContext = models.PricingContext(model_rules=[
-            vendorModel])  # ,options = models.PricingOptions(allow_any_instruments_with_sec_uid_to_price_off_lookup=True)) # for LUSID VM
-        marketContext = models.MarketContext(
-            options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope))
-
-        RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext, market=marketContext)
-
-        weightedInstrumentFXOpt_1y = models.WeightedInstrument(
-            quantity=1, holding_identifier="myholding1y",
-            instrument=instrument_definition_1y
-        )
-        weightedInstrumentFXOpt_2y = models.WeightedInstrument(
-            quantity=1, holding_identifier="myholding2y",
-            instrument=instrument_definition_2y
-        )
-        weightedInstrumentFXOpt_3y = models.WeightedInstrument(
-            quantity=1, holding_identifier="myholding3y",
-            instrument=instrument_definition_3y
-        )
-
-        weightedInstrumentList = [weightedInstrumentFXOpt_1y, weightedInstrumentFXOpt_2y,
-                                  weightedInstrumentFXOpt_3y]
-
-        aggregationRequestResource = models.AggregationRequest(
-            inline_recipe=RecipeId,
-            effective_at=start_date.isoformat(),
-            metrics=[
-                models.AggregateSpec(key='Analytic/default/ValuationDate',
-                                     op='Value'),
-                models.AggregateSpec(key='Holding/default/PV',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/DomCcy',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/FgnCcy',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/StartDate',
-                                     op='Value')
-                # models.AggregateSpec(key='Analytic/default/NextEvent',      #Lusid only
-                #                      op='Value'),
-                # models.AggregateSpec(key='Analytic/default/NextEventType',      #Lusid only
-                #                      op='Value'),
-                # models.AggregateSpec(key='Analytic/default/HoldingCashflows',       #Lusid only
-                #                      op='Value')
-                # models.AggregateSpec(key='Analytic/default/MaturityDate',
-                #                     op='Value')
-            ]
-        )
-        inlineRequestFXFwd = models.InlineAggregationRequest(request=aggregationRequestResource,
-                                                             instruments=weightedInstrumentList)
-
-        # Call LUSID to perform the aggregation
-
-        response = self.aggregation_api.get_aggregation_of_weighted_instruments(marketDataScope,
-                                                                                inline_request=inlineRequestFXFwd)
-        print(response.data[0])
-        print(response)
-
-        print(response)
-
-
-    ####################################################
-
-    def test_FX_OPT_aggregation_inline_weightedVM(self):
-        # price simple fx opts..demonstrate sensible pvs.
-        # can update dates etc
-        trade_date = datetime.today().replace(tzinfo=pytz.utc)
-        start_date = trade_date
-
-        end_date_1y = start_date.replace(year=start_date.year + 1)
-        end_date_2y = start_date.replace(year=start_date.year + 2)
-        end_date_3y = start_date.replace(year=start_date.year + 3)
-
-        dom_amount = 100000000
-        # Use mkt fwd to generate close to 0 PV? or use 5y and have over and under
-
-        fwd_FX_price_1y = self.start_GBPUSD_FX_price + self.GBPUSDpip_1y / 10000
-        fwd_FX_price_2y = self.start_GBPUSD_FX_price + self.GBPUSDpip_2y / 10000
-        fwd_FX_price_3y = self.start_GBPUSD_FX_price + self.GBPUSDpip_3y / 10000
-
-        fgn_amount_1y = dom_amount * -fwd_FX_price_1y
-        fgn_amount_2y = dom_amount * -fwd_FX_price_2y
-        fgn_amount_3y = dom_amount * -fwd_FX_price_3y
-
-        '''
-            The market data scope and supplier refer to (effectively) two fields in the database that describe who 'supplied' the data 
-            and the user 'scope' into which it is put. This *must* match the rule that is used to retrieve it or it simply will not be found. 
-        '''
-        marketDataScope = "TRRiskDomain"
-        marketSupplier = 'Lusid'
-
-        # Create a quote for the FX GBP/USD for 21/11/19
-        FX_quote = models.UpsertQuoteRequest(
-            quote_id=models.QuoteId(
-                quote_series_id=models.QuoteSeriesId(
-                    provider=marketSupplier,
-                    instrument_id="GBP/USD",
-                    instrument_id_type='CurrencyPair',
-                    quote_type='Price',
-                    field='mid'),
-                effective_at=start_date,
-            ),
-            metric_value=models.MetricValue(
-                value=self.start_GBPUSD_FX_price,
-                unit='rate'),
-            lineage='InternalSystem')
-
-        # Call LUSID to upsert the quote
-        response = self.quotes_api.upsert_quotes(
-            scope=marketDataScope,
-            quotes={"1": FX_quote})
-
-        instrument_definition_1y = models.FxOption(
-            start_date=start_date.isoformat(),
-            option_maturity_date=end_date_1y.isoformat(),
-            option_settlement_date=end_date_1y.isoformat(),
-            is_delivery_not_cash=True,
-            is_call_not_put=True,
-            strike=fwd_FX_price_1y,
-            dom_ccy="GBP",
-            fgn_ccy="USD",
-            instrument_type="FxOption"
-        )
-
-        instrument_definition_2y = models.FxOption(
-            start_date=start_date.isoformat(),
-            option_maturity_date=end_date_2y.isoformat(),
-            option_settlement_date=end_date_2y.isoformat(),
-            is_delivery_not_cash=True,
-            is_call_not_put=True,
-            strike=fwd_FX_price_2y,
-            dom_ccy="GBP",
-            fgn_ccy="USD",
-            instrument_type="FxOption"
-        )
-
-        instrument_definition_3y = models.FxOption(
-            start_date=start_date.isoformat(),
-            option_maturity_date=end_date_3y.isoformat(),
-            option_settlement_date=end_date_3y.isoformat(),
-            is_delivery_not_cash=True,
-            is_call_not_put=True,
-            strike=fwd_FX_price_3y,
-            dom_ccy="GBP",
-            fgn_ccy="USD",
-            instrument_type="FxOption"
-        )
-
-        print(response)
-
-        vendorModel = models.VendorModelRule(supplier="VolMaster", model_name="VendorDefault",
-                                             instrument_type="FxOption", parameters="{}")
-
-        pricingContext = models.PricingContext(model_rules=[vendorModel])
-        marketContext = models.MarketContext(
-            options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope))
-
-        RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext, market=marketContext)
-
-        weightedInstrumentFXOpt_1y = models.WeightedInstrument(
-            quantity=1, holding_identifier="myholding1y",
-            instrument=instrument_definition_1y
-        )
-        weightedInstrumentFXOpt_2y = models.WeightedInstrument(
-            quantity=1, holding_identifier="myholding2y",
-            instrument=instrument_definition_2y
-        )
-        weightedInstrumentFXOpt_3y = models.WeightedInstrument(
-            quantity=1, holding_identifier="myholding3y",
-            instrument=instrument_definition_3y
-        )
-
-        weightedInstrumentList = [weightedInstrumentFXOpt_1y, weightedInstrumentFXOpt_2y, weightedInstrumentFXOpt_3y]
-
-        aggregationRequestResource = models.AggregationRequest(
-            inline_recipe=RecipeId,
-            effective_at=start_date.isoformat(),
-            metrics=[
-                models.AggregateSpec(key='Analytic/default/ValuationDate',
-                                     op='Value'),
-                models.AggregateSpec(key='Holding/default/PV',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/DomCcy',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/FgnCcy',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/StartDate',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/MaturityDate',
-                                     op='Value')
-            ]
-        )
-        inlineRequestFXFwd = models.InlineAggregationRequest(request=aggregationRequestResource,
-                                                             instruments=weightedInstrumentList)
-
-        # Call LUSID to perform the aggregation
-
-        response = self.aggregation_api.get_aggregation_of_weighted_instruments(marketDataScope,
-                                                                                inline_request=inlineRequestFXFwd)
-
-        print(response)
-
-    def test_FX_OPT_QPS_multiexpiry(self):
+        try:
+            self.transaction_portfolios_api.create_portfolio(transactionScope, portfolioRequest)
+        except:
+            pass  # will fail on subsequent runs..
 
         trade_date = datetime.today().replace(tzinfo=pytz.utc)
         start_date = trade_date
-
-        end_date_1y = start_date.replace(year=start_date.year + 1)
-
-        dom_amount = 100000000
-
-        fwd_FX_price_1y = self.start_GBPUSD_FX_price + self.GBPUSDpip_1y / 10000
-
-        fgn_amount_1y = dom_amount * -fwd_FX_price_1y
-
-        '''
-            The market data scope and supplier refer to (effectively) two fields in the database that describe who 'supplied' the data 
-            and the user 'scope' into which it is put. This *must* match the rule that is used to retrieve it or it simply will not be found. 
-        '''
-        marketDataScope = "TRRiskDomain"
-        marketSupplier = 'Lusid'
-
-        # Create a quote for the FX GBP/USD for today
-        FX_quote = models.UpsertQuoteRequest(
-            quote_id=models.QuoteId(
-                quote_series_id=models.QuoteSeriesId(
-                    provider=marketSupplier,
-                    instrument_id="GBP/USD",
-                    instrument_id_type='CurrencyPair',
-                    quote_type='Price',
-                    field='mid'),
-                effective_at=start_date,
-            ),
-            metric_value=models.MetricValue(
-                value=self.start_GBPUSD_FX_price,
-                unit='rate'),
-            lineage='InternalSystem')
-
-        # Call LUSID to upsert the quote
-        response = self.quotes_api.upsert_quotes(
-            scope=marketDataScope,
-            quotes={"1": FX_quote})
-
-        instrument_definition_1y = models.FxOption(
-            start_date=start_date.isoformat(),
-            option_maturity_date=end_date_1y.isoformat(),
-            option_settlement_date=end_date_1y.isoformat(),
-            is_delivery_not_cash=True,
-            is_call_not_put=True,
-            strike=fwd_FX_price_1y,
-            dom_ccy="GBP",
-            fgn_ccy="USD",
-            instrument_type="FxOption"
-        )
-
-        print(response)
-
-        vendorModel = []
-        vendorModel.append(models.VendorModelRule(supplier="RefinitivQps", model_name="VendorDefault",
-                                                  instrument_type="FxOption", parameters="{}"))
-
-
-        weightedInstrumentFXOpt_1y = models.WeightedInstrument(
-            quantity=1, holding_identifier="myholding1y",
-            instrument=instrument_definition_1y
-        )
-
-
-        weightedInstrumentList = [weightedInstrumentFXOpt_1y]
-
-        for model in vendorModel:
-            pricingContext = models.PricingContext(model_rules=[model])
-            marketContext = models.MarketContext(
-                options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope))
-
-            RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext, market=marketContext)
-
-            aggregationRequestResource = models.AggregationRequest(
-                inline_recipe=RecipeId,
-                effective_at=start_date.isoformat(),
-                metrics=[
-                    models.AggregateSpec(key='Analytic/default/ValuationDate',
-                                         op='Value'),
-                    models.AggregateSpec(key='Holding/default/PV',
-                                         op='Value'),
-                    models.AggregateSpec(key='Analytic/default/DomCcy',
-                                         op='Value'),
-                    models.AggregateSpec(key='Analytic/default/FgnCcy',
-                                         op='Value'),
-                    models.AggregateSpec(key='Analytic/default/StartDate',
-                                         op='Value'),
-                    models.AggregateSpec(key='Analytic/default/MaturityDate',
-                                         op='Value'),
-                    models.AggregateSpec(key='Analytic/default/NextEvent',
-                                         op='Value'),
-                    models.AggregateSpec(key='Analytic/default/NextEventType',
-                                         op='Value')
-                ]
-            )
-            inlineRequestFXOpt = models.InlineAggregationRequest(request=aggregationRequestResource,
-                                                                 instruments=weightedInstrumentList)
-
-            # Call LUSID to perform the aggregation
-
-            response = self.aggregation_api.get_aggregation_of_weighted_instruments(marketDataScope,
-                                                                                    inline_request=inlineRequestFXOpt)
-
-            print(response)
-
-    def test_FX_FWD_aggregation_inline_weightedVM(self):
-        # price simple fx fwd..demonstrate sensible pvs.
-        # can update dates etc
-        trade_date = datetime.today().replace(tzinfo=pytz.utc)
-        start_date = trade_date  # change to spot?
 
         end_date_3y = start_date.replace(year=start_date.year + 3)
         end_date_5y = start_date.replace(year=start_date.year + 5)
         end_date_10y = start_date.replace(year=start_date.year + 10)
 
         dom_amount = 100000000
-        # Use mkt fwd to generate close to 0 PV? or use 5y and have over and under
+
+        # Use mkt fwd pips to generate fwd FX prices for foreign leg (USD)
 
         fwd_FX_price_3y = self.start_GBPUSD_FX_price + self.GBPUSDpip_3y / 10000
         fwd_FX_price_5y = self.start_GBPUSD_FX_price + self.GBPUSDpip_5y / 10000
         fwd_FX_price_10y = self.start_GBPUSD_FX_price + self.GBPUSDpip_10y / 10000
 
+        # use foreign fwd FX price to generate foreign cash leg
         fgn_amount_3y = dom_amount * -fwd_FX_price_3y
         fgn_amount_5y = dom_amount * -fwd_FX_price_5y
         fgn_amount_10y = dom_amount * -fwd_FX_price_10y
 
-        '''
-            The market data scope and supplier refer to (effectively) two fields in the database that describe who 'supplied' the data 
-            and the user 'scope' into which it is put. This *must* match the rule that is used to retrieve it or it simply will not be found. 
-        '''
+        #The market data scope refers to the user partition into which market data is stored
+        #The supplier denotes the owner of the market data (not the price source)
+        #This *must* match the recipe ruleset that is used to retrieve the data or it will not be found.
+
         marketDataScope = "TRRiskDomain"
         marketSupplier = 'Lusid'
 
-        # Create a quote for the FX GBP/USD for 21/11/19
+        # Create a quote for spot FX GBP/USD
         FX_quote = models.UpsertQuoteRequest(
             quote_id=models.QuoteId(
                 quote_series_id=models.QuoteSeriesId(
@@ -2501,6 +1795,8 @@ class Valuation(unittest.TestCase):
         response = self.quotes_api.upsert_quotes(
             scope=marketDataScope,
             quotes={"1": FX_quote})
+
+        #create the FX forward instruments
 
         instrument_definition_3y = models.FxForwardInstrument(
             dom_amount=dom_amount,
@@ -2538,35 +1834,236 @@ class Valuation(unittest.TestCase):
             dom_ccy="GBP",
             instrument_type="FxForward")
 
+        print(response)
+        #book these 3 FX fwds
+        #
+        #
+        #
+        #
+
+        # create a 'book' of 3 IRS trades
+        # to create current cashflow events, we will create swaps starting 3m & 6m ago,
+        # so the first fix is happening now
+        # swap1 - start - 3m and a day in the past, for 5y (quarterly EURIBOR)
+        swap1_start_date = start_date.replace(month=start_date.month -3)
+        swap1_start_date = swap1_start_date.replace(day=swap1_start_date.day - 1)
+        swap1_end_date = swap1_start_date.replace(year=swap1_start_date.year + 5)
+
+        # swap2 - start - 6m in the past, for 7y
+        swap2_start_date = start_date.replace(month=start_date.month - 6)
+        swap2_end_date = swap2_start_date.replace(year=swap2_start_date.year + 7)
+
+        # swap3 - start - 12m and a day in the past, for 3y
+        swap3_start_date = start_date.replace(year=start_date.year - 12)
+        swap3_start_date = swap3_start_date.replace(day=swap3_start_date.day - 2)
+        swap3_end_date = swap3_start_date.replace(year=swap3_start_date.year + 3)
 
 
-        vendorModel = models.VendorModelRule(supplier="VolMaster", model_name="VendorDefault",
+        # ccy = EUR
+        swapCCY = "EUR"
+        dom1 = 75000000
+        dom2 = 55000000
+        dom3 =125500000
+        pay1 = True
+        pay2 = False
+        pay3 = True
+        rate1 =0.01
+        rate2 = 0.0125
+        rate3 = 0.005
+
+
+        # create the flow convention for each leg
+
+        flow_conventionFixed = models.FlowConventions(
+            currency="EUR",
+            payment_frequency=models.Tenor(value=1, unit="Y"),
+            day_count_convention="ThirtyU360",
+            roll_convention="ModifiedFollowing",
+            holiday_calendars=[]
+        )
+        flow_conventionFloat_semi = models.FlowConventions(
+            currency="EUR",
+            payment_frequency=models.Tenor(value=6, unit="M"),
+            day_count_convention="Act360",
+            roll_convention="ModifiedFollowing",
+            holiday_calendars=[]
+        )
+        flow_conventionFloat_quarterly = models.FlowConventions(
+            currency="EUR",
+            payment_frequency=models.Tenor(value=3, unit="M"),
+            day_count_convention="Act360",
+            roll_convention="ModifiedFollowing",
+            holiday_calendars=[]
+        )
+        # create the swap legs themselves
+        instrument_definition_leg1 = models.InstrumentLeg(
+            conventions=flow_conventionFixed,
+            is_pay_not_receive=pay1,
+            is_float_not_fixed=False,
+            fixed_rate=rate1
+        )
+        instrument_definition_leg2 = models.InstrumentLeg(
+            conventions=flow_conventionFloat_quarterly,
+            is_pay_not_receive=not(pay1),
+            is_float_not_fixed=True,
+            fixed_rate=0.0
+        )
+        instrument_definition_leg3 = models.InstrumentLeg(
+            conventions=flow_conventionFixed,
+            is_pay_not_receive=pay2,
+            is_float_not_fixed=False,
+            fixed_rate=rate2
+        )
+        instrument_definition_leg4 = models.InstrumentLeg(
+            conventions=flow_conventionFloat_semi,
+            is_pay_not_receive=not(pay2),
+            is_float_not_fixed=True,
+            fixed_rate=0.0
+        )
+        instrument_definition_leg5 = models.InstrumentLeg(
+            conventions=flow_conventionFixed,
+            is_pay_not_receive=pay3,
+            is_float_not_fixed=False,
+            fixed_rate=rate3
+        )
+        instrument_definition_leg6 = models.InstrumentLeg(
+            conventions=flow_conventionFloat_semi,
+            is_pay_not_receive=not(pay3),
+            is_float_not_fixed=True,
+            fixed_rate=0.0
+        )
+        irs_legs1 = [
+            instrument_definition_leg1,
+            instrument_definition_leg2
+        ]
+        irs_legs2 = [
+            instrument_definition_leg3,
+            instrument_definition_leg4
+        ]
+        irs_legs3 = [
+            instrument_definition_leg5,
+            instrument_definition_leg6
+        ]
+
+        # create the swaps
+        swap1 = models.SwapInstrument(
+            start_date=swap1_start_date.isoformat(),
+            maturity_date=swap1_end_date.isoformat(),
+            notional=dom1,
+            legs=irs_legs1,
+            is_amortizing=False,
+            notional_exchange_type="None",
+            instrument_type="InterestRateSwap")
+        # 2
+        swap2 = models.SwapInstrument(
+            start_date=swap2_start_date.isoformat(),
+            maturity_date=swap2_end_date.isoformat(),
+            notional=dom2,
+            legs=irs_legs2,
+            is_amortizing=False,
+            notional_exchange_type="None",
+            instrument_type="InterestRateSwap")
+        #3
+        swap3 = models.SwapInstrument(
+            start_date=swap3_start_date.isoformat(),
+            maturity_date=swap3_end_date.isoformat(),
+            notional=dom3,
+            legs=irs_legs3,
+            is_amortizing=False,
+            notional_exchange_type="None",
+            instrument_type="InterestRateSwap")
+
+        # now we book these swaps into the portfolio
+
+        # create instruments and book a unitised txn (the details are all in the swap inst)
+
+
+        # when it comes to the recipe, we need something that describes what to do with swaps and FX forwards
+        # at first, we'll value with the recipe set to simple static.
+        # then we can change to discount and add the VolMaster model just for fx fwds
+        # finally we can add XXXX for swaps??
+
+
+
+        vendorModelQPs = models.VendorModelRule(supplier="RefinitivQps", model_name="VendorDefault",
                                              instrument_type="FxForward", parameters="{}")
 
-        pricingContext = models.PricingContext(model_rules=[vendorModel])
+        vendorModelTW = models.VendorModelRule(supplier="RefinitivTracsWeb", model_name="VendorDefault",
+                                             instrument_type="FxForward", parameters="{}")
+
+        vendorModelVM = models.VendorModelRule(supplier="VolMaster", model_name="VendorDefault",
+                                             instrument_type="FxForward", parameters="{}")
+
+
+        #next we take the fwd instruments and add them to an inline weighted instrument list for pricing
+
+        weightedInstrumentFXFwd_3y = models.WeightedInstrument(quantity=1, holding_identifier="myholding3y",
+                                                               instrument=instrument_definition_3y)
+
+        weightedInstrumentFXFwd_5y = models.WeightedInstrument(quantity=1, holding_identifier="myholding5y",
+                                                               instrument=instrument_definition_5y)
+
+        weightedInstrumentFXFwd_10y = models.WeightedInstrument(quantity=1, holding_identifier="myholding10y",
+                                                                instrument=instrument_definition_10y)
+
+        weightedInstrumentIRS1 = models.WeightedInstrument(quantity=1, holding_identifier="swap1",
+                                                           instrument=swap1)
+
+        weightedInstrumentIRS2 = models.WeightedInstrument(quantity=1, holding_identifier="swap2",
+                                                           instrument=swap2)
+
+        weightedInstrumentIRS3 = models.WeightedInstrument(quantity=1, holding_identifier="swap3",
+                                                           instrument=swap3)
+
+
+        weightedInstrumentList = [weightedInstrumentFXFwd_3y, weightedInstrumentFXFwd_5y, weightedInstrumentFXFwd_10y,
+                                  weightedInstrumentIRS1, weightedInstrumentIRS2, weightedInstrumentIRS3]
+
+
+        # to create the recipe, in this case we will need a pricing and a market context.
+        # the former attaches the pricing model used and parameters around its usage
+        # the latter contains instructions on the market data source and rules
+
+        pricingContext = models.PricingContext(
+            options=models.PricingOptions(produce_separate_result_for_linear_otc_legs=False),
+            model_rules=[
+                models.VendorModelRule(supplier="Lusid", model_name="SimpleStatic", instrument_type="FxForward",
+                                       parameters="{}"),
+                models.VendorModelRule(supplier="Lusid", model_name="SimpleStatic", instrument_type="InterestRateSwap",
+                                       parameters="{}")
+            ]
+        )
+        marketContext = models.MarketContext(
+            options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope),
+            market_rules=[
+                models.MarketDataKeyRule(key="Fx.*.*", data_scope=marketDataScope, supplier=marketSupplier,
+                                         quote_type='Price', field='mid'),
+                models.MarketDataKeyRule(key="Rates.*.*", data_scope=marketDataScope, supplier=marketSupplier,
+                                         quote_type='Rate', field='mid')
+            ]
+        )
+        RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext, market=marketContext)
+
+
+
+        pricingContext = models.PricingContext(model_rules=[vendorModelVM])
         marketContext = models.MarketContext(
             options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope))
 
+        # the recipe then binds together these constituents
         RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext, market=marketContext)
-
-        weightedInstrumentFXFwd_3y = models.WeightedInstrument(
-            quantity=1, holding_identifier="myholding3y",
-            instrument=instrument_definition_3y
-        )
-        weightedInstrumentFXFwd_5y = models.WeightedInstrument(
-            quantity=1, holding_identifier="myholding5y",
-            instrument=instrument_definition_5y
-        )
-        weightedInstrumentFXFwd_10y = models.WeightedInstrument(
-            quantity=1, holding_identifier="myholding10y",
-            instrument=instrument_definition_10y
-        )
-
-        weightedInstrumentList = [weightedInstrumentFXFwd_3y, weightedInstrumentFXFwd_5y, weightedInstrumentFXFwd_10y]
-
+        #
+        # if model.supplier == "RefinitivTracsWeb":
+        #     pricing_date = trade_date - timedelta(days=1)
+        # else:
+        #     pricing_date = trade_date
+        pricing_date = trade_date
+        # the aggregation is a powerful mechanism for producing a result set, we will show later how the cashflow
+        # output can be pushed straight back into the movements engine. It can also persist external results
+        # and will shortly combine with Honeycomb for reporting
         aggregationRequestResource = models.AggregationRequest(
             inline_recipe=RecipeId,
-            effective_at=start_date.isoformat(),
+            effective_at=pricing_date.isoformat(),
             metrics=[
                 models.AggregateSpec(key='Analytic/default/ValuationDate',
                                      op='Value'),
@@ -2585,7 +2082,7 @@ class Valuation(unittest.TestCase):
         inlineRequestFXFwd = models.InlineAggregationRequest(request=aggregationRequestResource,
                                                              instruments=weightedInstrumentList)
 
-        # Call LUSID to perform the aggregation
+        # Call LUSID to perform the aggregation, print the result
 
         response = self.aggregation_api.get_aggregation_of_weighted_instruments(marketDataScope,
                                                                                 inline_request=inlineRequestFXFwd)
@@ -2593,141 +2090,93 @@ class Valuation(unittest.TestCase):
         print(response)
 
 
-    def test_FX_FWD_single_bi_temp(self):
 
-        #set the start and trade date to be 'today' with no time association
-
-        dt = datetime.now()
-
-        trade_date = datetime(dt.year, dt.month, dt.day).replace(tzinfo=pytz.utc)
-
-        start_date = trade_date  # change to spot?
-
-        end_date_3y = start_date.replace(year=start_date.year + 3)
-
-        erroneous_fx = self.start_GBPUSD_FX_price * 1.25
-
-        dom_amount = 100000000
-        # Use mkt fwd to generate close to 0 PV? or use 5y and have over and under
-
-        fwd_FX_price_3y = self.start_GBPUSD_FX_price + self.GBPUSDpip_3y / 10000
-
-        fgn_amount_3y = dom_amount * -fwd_FX_price_3y
-
-         #The market data scope and supplier refer to the user 'scope' into which market data is stored and the supplier
-        #or owner of that data (not the source of it) respectively.
-        #This *must* match the rule that is used to retrieve it or it will not be found.
+    ################################################
+    # Test: Show 10yr IRS cashflows
+    # Maturity 10y, semi bond 6s EUR IRS
+    # Test will only show (for now) known (set) cashflows
+    # NB there are cash amounts in the slices unlike options, where the cash is unknown
+    # and there is nothing in NextEvent, because known cashflows are not regarded as events
+    # Models tested - LUSID
+    # LUSID aggregation in inline, using weighted instruments which are not persisted
+    def test_CDS(self):
 
         marketDataScope = "TRRiskDomain"
         marketSupplier = 'Lusid'
 
-        # Create a quote for the FX GBP/USD for today, firstly with the erroneous FX (record the time)
+        trade_date = datetime.today().replace(tzinfo=pytz.utc)
+        start_date = trade_date
+        effectiveAt = start_date
 
-        FX_quote = models.UpsertQuoteRequest(
-            quote_id=models.QuoteId(
-                quote_series_id=models.QuoteSeriesId(
-                    provider=marketSupplier,
-                    instrument_id="GBP/USD",
-                    instrument_id_type='CurrencyPair',
-                    quote_type='Price',
-                    field='mid'),
-                effective_at=start_date,
-            ),
-            metric_value=models.MetricValue(
-                value=erroneous_fx,
-                unit='rate'),
-            lineage='InternalSystem')
+        end_date_5y = start_date.replace(year=start_date.year + 5)
 
-        # Call LUSID to upsert the quote
-        response = self.quotes_api.upsert_quotes(
-            scope=marketDataScope,
-            quotes={"1": FX_quote})
+        dom_amount = 50000000 #50mil
 
-        added_quote_time1 = response.values['1']._as_at
+        #create the flow convention for each leg
 
-        # Create a quote for the FX GBP/USD for today, and now with the correct FX (again, record the time)
-        FX_quote = models.UpsertQuoteRequest(
-            quote_id=models.QuoteId(
-                quote_series_id=models.QuoteSeriesId(
-                    provider=marketSupplier,
-                    instrument_id="GBP/USD",
-                    instrument_id_type='CurrencyPair',
-                    quote_type='Price',
-                    field='mid'),
-                effective_at=start_date,
-            ),
-            metric_value=models.MetricValue(
-                value=self.start_GBPUSD_FX_price,
-                unit='rate'),
-            lineage='InternalSystem')
+        flow_conventionFixed= models.FlowConventions(
+            currency="EUR",
+            payment_frequency=models.Tenor(value=6,unit="M"),
+            day_count_convention="ThirtyU360",
+            roll_convention="ModifiedFollowing",
+            holiday_calendars=[]
+        )
+        flow_conventionFloat = models.FlowConventions(
+            currency="EUR",
+            payment_frequency=models.Tenor(value=6, unit="M"),
+            day_count_convention="Act360",
+            roll_convention="ModifiedFollowing",
+            holiday_calendars=[]
+        )
 
-        # Call LUSID to upsert the quote
-        response = self.quotes_api.upsert_quotes(
-            scope=marketDataScope,
-            quotes={"1": FX_quote})
+        CDS_detail_spec = models.CdsDetailSpecification(
+            seniority="SNR",
+            restructuring_type="CR",
+            protect_start_day=True,
+            pay_accrued_interest_on_default=True,
+            roll_frequency=models.Tenor(value=6,unit="M")
+        )
 
-        added_quote_time2 = response.values['1']._as_at
-
-
-
-        instrument_definition_3y = models.FxForwardInstrument(
-            dom_amount=dom_amount,
-            fgn_amount=-fgn_amount_3y,
-            is_ndf=False,
-            fixing_date=trade_date.isoformat(),
-            fgn_ccy="USD",
-            ref_spot_rate=self.start_GBPUSD_FX_price,
+        #create the CDS
+        instrument_definition_5yEURCDS = models.CdsInstrument(
+            ticker="myticker",
+            flow_conventions=[flow_conventionFloat,flow_conventionFixed],
+            coupon_rate=0.01,
+            detail_specification=CDS_detail_spec,
             start_date=start_date.isoformat(),
-            maturity_date=end_date_3y.isoformat(),
-            dom_ccy="GBP",
-            instrument_type="FxForward")
-
-        print(response)
-
-        vendorModel=[]
-
-        vendorModel.append(models.VendorModelRule(supplier="RefinitivQps", model_name="VendorDefault",
-                                             instrument_type="FxForward", parameters="{}"))
-
-        # vendorModel.append(models.VendorModelRule(supplier="RefinitivTracsWeb", model_name="VendorDefault",
-        #                                      instrument_type="FxForward", parameters="{}"))
-        #
-        # vendorModel.append(models.VendorModelRule(supplier="VolMaster", model_name="VendorDefault",
-        #                                      instrument_type="FxForward", parameters="{}"))
-
-        weightedInstrumentFXFwd_3y = models.WeightedInstrument(quantity=1, holding_identifier="myholding3y",
-                                                            instrument=instrument_definition_3y)
-
-        weightedInstrumentList = [weightedInstrumentFXFwd_3y] #, weightedInstrumentFXFwd_5y, weightedInstrumentFXFwd_10y]
+            maturity_date=end_date_5y.isoformat(),
+            dom_ccy="EUR",
+            instrument_type="CreditDefaultSwap")
 
 
-        pricingContext = models.PricingContext(model_rules=vendorModel)
-        marketContext = models.MarketContext(
-            options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope))
 
-        RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext, market=marketContext)
+        pricingContext = models.PricingContext(
+            options=models.PricingOptions(
+                allow_any_instruments_with_sec_uid_to_price_off_lookup=True,
+                allow_partially_successful_evaluation=True
+            ),
+        )
 
+        RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext)  # , market=marketContext)
+
+        weightedInstrument_5yEURCDS = models.WeightedInstrument(quantity=1, holding_identifier="myholding_5yEURCDS",
+                                                                 instrument=instrument_definition_5yEURCDS)
         aggregationRequestResource = models.AggregationRequest(
             inline_recipe=RecipeId,
             effective_at=start_date.isoformat(),
-            as_at=added_quote_time1.isoformat(),
             metrics=[
                 models.AggregateSpec(key='Analytic/default/ValuationDate',
                                      op='Value'),
-                models.AggregateSpec(key='Holding/default/PV',
+                models.AggregateSpec(key='Analytic/default/NextEvent',
                                      op='Value'),
-                models.AggregateSpec(key='Analytic/default/DomCcy',
+                models.AggregateSpec(key='Analytic/default/NextEventType',
                                      op='Value'),
-                models.AggregateSpec(key='Analytic/default/FgnCcy',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/StartDate',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/MaturityDate',
+                models.AggregateSpec(key='Analytic/default/HoldingCashflows',
                                      op='Value')
             ]
         )
         inlineRequestFXFwd = models.InlineAggregationRequest(request=aggregationRequestResource,
-                                                             instruments=weightedInstrumentList)
+                                                             instruments=[weightedInstrument_5yEURCDS])
 
         # Call LUSID to perform the aggregation
 
@@ -2736,32 +2185,12 @@ class Valuation(unittest.TestCase):
 
         print(response)
 
-        aggregationRequestResource = models.AggregationRequest(
-            inline_recipe=RecipeId,
-            effective_at=start_date.isoformat(),
-            as_at=added_quote_time2.isoformat(),
-            metrics=[
-                models.AggregateSpec(key='Analytic/default/ValuationDate',
-                                     op='Value'),
-                models.AggregateSpec(key='Holding/default/PV',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/DomCcy',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/FgnCcy',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/StartDate',
-                                     op='Value'),
-                models.AggregateSpec(key='Analytic/default/MaturityDate',
-                                     op='Value')
-            ]
-        )
-        inlineRequestFXFwd = models.InlineAggregationRequest(request=aggregationRequestResource,
-                                                             instruments=weightedInstrumentList)
 
-        # Call LUSID again, to perform the aggregation with the latter asat time
 
-        response = self.aggregation_api.get_aggregation_of_weighted_instruments(marketDataScope,
-                                                                                inline_request=inlineRequestFXFwd)
 
-        print(response)
+
+
+
+
+
 

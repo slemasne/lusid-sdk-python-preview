@@ -1,0 +1,3 @@
+﻿fund_code,fund_name,fund_description,fund_baseccy,txn_id,txn_type,txn_trade_date,txn_settle_date,txn_units,txn_price,txn_consideration,exchange_rate,txn_instrument_id,PortionClass,PortionSubClass,PortionRegion,sm_instrument_type,sm_name,sm_sedol,sm_ticker,sm_currency
+FUND_A,Test fund A,Multi-asset fund for test transactions,GBP,trd_FXRoll_01,FwdFxBuy,14/02/2020,14/02/2021,6000000,1,7224000,1.204,EUR,GovernmentBonds,None,None,Cash,FX Forward,,,GBP
+FUND_A,Test fund A,Multi-asset fund for test transactions,GBP,trd_tearup_01,Buy,14/02/2020,14/02/2020,1,1,1,1,GBP,GovernmentBonds,None,None,Cash,Cash,,,GBP
