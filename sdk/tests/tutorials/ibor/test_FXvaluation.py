@@ -1455,7 +1455,7 @@ class Valuation(unittest.TestCase):
 
 
         transactionScope = "Finbourne-Examples"
-        transactionPortfolio = "Test15"
+        transactionPortfolio = "Test16"
         spotGBPEUR = 1.2021
         portfolioRequest = models.CreateTransactionPortfolioRequest(
             display_name="test portfolio",
@@ -1726,11 +1726,10 @@ class Valuation(unittest.TestCase):
 
     ################################################
     # Test: show a variety of instruments, with a set of recipes to price in different ways
-    # Then we show how recipes can supersede each other.
-    # Finally, we wish to show the cashflows being returned from the set of transactions, holdings and instruments
+    # Then we show how recipes can supersede each other
     # At first, we will do this in-line, then add the ability to upsert the recipes and instruments/transactions
 
-    def test_cashflows_and_recipes_together(self):
+    def test_recipe_order(self):
 
         #create a portfolio to book our cash, otc instruments
         transactionScope = "Finbourne-Examples"
@@ -2020,6 +2019,14 @@ class Valuation(unittest.TestCase):
                                   weightedInstrumentIRS1, weightedInstrumentIRS2, weightedInstrumentIRS3]
 
 
+        # 1 show the results with a lusid simple static model...will return quotes x q
+        # upsert tw recipes, two different scopes
+        # inherited recipe section + additional rule
+        # 2 upload a cm data doc..show different ccys
+        # 3 add in a pricing context for fx fwds...VM?
+        # add in something for swaps?
+
+
         # to create the recipe, in this case we will need a pricing and a market context.
         # the former attaches the pricing model used and parameters around its usage
         # the latter contains instructions on the market data source and rules
@@ -2036,6 +2043,8 @@ class Valuation(unittest.TestCase):
         marketContext = models.MarketContext(
             options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope),
             market_rules=[
+                models.MarketDataKeyRule(key="Fx.*.*", data_scope="some-other-scope", supplier=marketSupplier,
+                                         quote_type='Price', field='mid'),
                 models.MarketDataKeyRule(key="Fx.*.*", data_scope=marketDataScope, supplier=marketSupplier,
                                          quote_type='Price', field='mid'),
                 models.MarketDataKeyRule(key="Rates.*.*", data_scope=marketDataScope, supplier=marketSupplier,
@@ -2046,17 +2055,13 @@ class Valuation(unittest.TestCase):
 
 
 
-        pricingContext = models.PricingContext(model_rules=[vendorModelVM])
+        # pricingContext = models.PricingContext(model_rules=[vendorModelVM])
         marketContext = models.MarketContext(
             options=models.MarketOptions(default_supplier=marketSupplier, default_scope=marketDataScope))
 
         # the recipe then binds together these constituents
         RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext, market=marketContext)
-        #
-        # if model.supplier == "RefinitivTracsWeb":
-        #     pricing_date = trade_date - timedelta(days=1)
-        # else:
-        #     pricing_date = trade_date
+
         pricing_date = trade_date
         # the aggregation is a powerful mechanism for producing a result set, we will show later how the cashflow
         # output can be pushed straight back into the movements engine. It can also persist external results
@@ -2092,8 +2097,8 @@ class Valuation(unittest.TestCase):
 
 
     ################################################
-    # Test: Show 10yr IRS cashflows
-    # Maturity 10y, semi bond 6s EUR IRS
+    # Test: create a 5yr CDS on XXXX
+    # Maturity 5y, semi bond 6s EUR IRS
     # Test will only show (for now) known (set) cashflows
     # NB there are cash amounts in the slices unlike options, where the cash is unknown
     # and there is nothing in NextEvent, because known cashflows are not regarded as events
@@ -2187,7 +2192,115 @@ class Valuation(unittest.TestCase):
 
 
 
+    ################################################
+    # Test: Show 10yr IRS cashflows
+    # Maturity 10y, semi bond 6s EUR IRS
+    # Test will only show (for now) known (set) cashflows
+    # NB there are cash amounts in the slices unlike options, where the cash is unknown
+    # and there is nothing in NextEvent, because known cashflows are not regarded as events
+    # Models tested - LUSID
+    # LUSID aggregation in inline, using weighted instruments which are not persisted
 
+    def test_SWOPT_expiry_and_exercise(self):
+
+        marketDataScope = "MarketDataDomain"
+        marketSupplier = 'Lusid'
+
+        trade_date = datetime.today().replace(tzinfo=pytz.utc)
+        start_date = trade_date
+        effectiveAt = start_date
+
+        end_date_10y = start_date.replace(year=start_date.year + 10)
+
+        swapCCY = "EUR"
+
+        dom_amount = 75000000
+
+        #create the flow convention for each leg
+
+        flow_conventionFixed= models.FlowConventions(
+            currency="EUR",
+            payment_frequency=models.Tenor(value=6,unit="M"),
+            day_count_convention="ThirtyU360",
+            roll_convention="ModifiedFollowing",
+            holiday_calendars=[]
+        )
+        flow_conventionFloat = models.FlowConventions(
+            currency="EUR",
+            payment_frequency=models.Tenor(value=6, unit="M"),
+            day_count_convention="Act360",
+            roll_convention="ModifiedFollowing",
+            holiday_calendars=[]
+        )
+
+        # create the swap legs themselves
+
+        #irs_legs=[]
+        instrument_definition_leg1 = models.InstrumentLeg(
+            conventions=flow_conventionFixed,
+            is_pay_not_receive=True,
+            is_float_not_fixed=False,
+            fixed_rate=0.01
+        )
+        instrument_definition_leg2 = models.InstrumentLeg(
+            conventions=flow_conventionFloat,
+            is_pay_not_receive=False,
+            is_float_not_fixed=True,
+            fixed_rate=0.0
+        )
+        irs_legs = [
+            instrument_definition_leg1,
+            instrument_definition_leg2
+        ]
+
+        #create the swap
+        instrument_definition_10yEURIRS = models.SwapInstrument(
+            start_date=start_date.isoformat(),
+            maturity_date=end_date_10y.isoformat(),
+            notional=dom_amount,
+            legs=irs_legs,
+            is_amortizing=False,
+            notional_exchange_type="None",
+            instrument_type="InterestRateSwap")
+
+
+        swopt_inst_def = models
+
+
+        pricingContext = models.PricingContext(
+            options=models.PricingOptions(
+                allow_any_instruments_with_sec_uid_to_price_off_lookup=True,
+                allow_partially_successful_evaluation=True
+            ),
+        )
+
+        RecipeId = models.ConfigurationRecipe(code="Recipe1", pricing=pricingContext)  # , market=marketContext)
+
+        weightedInstrument_10yEURIRS = models.WeightedInstrument(quantity=1, holding_identifier="myholding_10yEURIRS",
+                                                                 instrument=instrument_definition_10yEURIRS)
+        aggregationRequestResource = models.AggregationRequest(
+            inline_recipe=RecipeId,
+            effective_at=start_date.isoformat(),
+            metrics=[
+                models.AggregateSpec(key='Analytic/default/ValuationDate',
+                                     op='Value'),
+                models.AggregateSpec(key='Analytic/default/NextEvent',
+                                     op='Value'),
+                models.AggregateSpec(key='Analytic/default/NextEventType',
+                                     op='Value'),
+                models.AggregateSpec(key='Analytic/default/HoldingCashflows',
+                                     op='Value')
+            ]
+        )
+        inlineRequestFXFwd = models.InlineAggregationRequest(request=aggregationRequestResource,
+                                                             instruments=[weightedInstrument_10yEURIRS])
+
+        # Call LUSID to perform the aggregation
+
+        response = self.aggregation_api.get_aggregation_of_weighted_instruments(marketDataScope,
+                                                                                inline_request=inlineRequestFXFwd)
+
+        print(response)
 
 
 
