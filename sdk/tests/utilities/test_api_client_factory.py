@@ -19,11 +19,13 @@ class UnknownImpl:
     pass
 
 
-source_config_details, config_keys = CredentialsSource.fetch_credentials(), CredentialsSource.fetch_config_keys()
+source_config_details, config_keys = (
+    CredentialsSource.fetch_credentials(),
+    CredentialsSource.fetch_config_keys(),
+)
 
 
 class RefreshingToken(UserString):
-
     def __init__(self):
         token_data = {"expires": datetime.now(), "current_access_token": ""}
 
@@ -47,10 +49,12 @@ class ApiFactory(unittest.TestCase):
         self.assertIsInstance(result, ResourceListOfInstrumentIdTypeDescriptor)
         self.assertGreater(len(result.values), 0)
 
-    @parameterized.expand([
-        ["Unknown API", UnknownApi, "unknown api: UnknownApi"],
-        ["Unknown Implementation", UnknownImpl, "unknown api: UnknownImpl"]
-    ])
+    @parameterized.expand(
+        [
+            ["Unknown API", UnknownApi, "unknown api: UnknownApi"],
+            ["Unknown Implementation", UnknownImpl, "unknown api: UnknownImpl"],
+        ]
+    )
     def test_get_unknown_api_throws_exception(self, _, api_to_build, error_message):
         factory = ApiClientFactory(
             api_secrets_filename=CredentialsSource.secrets_path()
@@ -61,12 +65,21 @@ class ApiFactory(unittest.TestCase):
         self.assertEqual(error.exception.args[0], error_message)
 
     def test_get_api_with_token(self):
-        token, refresh_token = tu.get_okta_tokens(CredentialsSource.secrets_path())
-        factory = ApiClientFactory(
-            token=token,
-            api_url=source_config_details["api_url"],
-            app_name=source_config_details["app_name"]
-        )
+
+        env_vars = {
+            config_keys[key]["env"]: value
+            for key, value in source_config_details.items()
+            if value is not None
+        }
+        env_vars.pop("FBN_API_TOKEN", None)
+
+        with patch.dict("os.environ", env_vars, clear=True):
+            token, refresh_token = tu.get_okta_tokens(CredentialsSource.secrets_path())
+            factory = ApiClientFactory(
+                token=token,
+                api_url=source_config_details["api_url"],
+                app_name=source_config_details["app_name"],
+            )
         api = factory.build(InstrumentsApi)
         self.assertIsInstance(api, InstrumentsApi)
         self.validate_api(api)
@@ -94,11 +107,19 @@ class ApiFactory(unittest.TestCase):
         self.validate_api(api)
 
     def test_get_api_with_token_url_as_env_var(self):
-        token, refresh_token = tu.get_okta_tokens(CredentialsSource.secrets_path())
-        with patch.dict('os.environ', {"FBN_LUSID_API_URL": source_config_details["api_url"]}, clear=True):
+
+        env_vars = {
+            config_keys[key]["env"]: value
+            for key, value in source_config_details.items()
+            if value is not None
+        }
+        env_vars.pop("FBN_API_TOKEN", None)
+
+        with patch.dict("os.environ", env_vars, clear=True):
+            token, refresh_token = tu.get_okta_tokens(CredentialsSource.secrets_path())
             factory = ApiClientFactory(
-                token=token,
-                app_name=source_config_details["app_name"])
+                token=token, app_name=source_config_details["app_name"]
+            )
         api = factory.build(InstrumentsApi)
         self.assertIsInstance(api, InstrumentsApi)
         self.validate_api(api)
@@ -150,13 +171,15 @@ class ApiFactory(unittest.TestCase):
 
         secrets = {
             "api": {
-                config_keys[key]["config"]: value for key, value in source_config_details.items() if
-                value is not None and "proxy" not in key
+                config_keys[key]["config"]: value
+                for key, value in source_config_details.items()
+                if value is not None and "proxy" not in key
             },
             "proxy": {
-                config_keys[key]["config"]: value for key, value in source_config_details.items() if
-                value is not None and "proxy" in key
-            }
+                config_keys[key]["config"]: value
+                for key, value in source_config_details.items()
+                if value is not None and "proxy" in key
+            },
         }
 
         secrets["api"].pop("clientCertificate", None)
@@ -176,8 +199,9 @@ class ApiFactory(unittest.TestCase):
 
         secrets = {
             "api": {
-                config_keys[key]["config"]: value for key, value in source_config_details.items() if
-                value is not None and "proxy" not in key
+                config_keys[key]["config"]: value
+                for key, value in source_config_details.items()
+                if value is not None and "proxy" not in key
             }
         }
 
@@ -188,12 +212,13 @@ class ApiFactory(unittest.TestCase):
 
         secrets_file = TempFileManager.create_temp_file(secrets)
         # Load the config
-        with patch.dict('os.environ', {}, clear=True):
+        with patch.dict("os.environ", {}, clear=True):
             factory = ApiClientFactory(
                 api_secrets_filename=secrets_file.name,
                 proxy_url=source_config_details["proxy_address"],
                 proxy_username=source_config_details["proxy_username"],
-                proxy_password=source_config_details["proxy_password"])
+                proxy_password=source_config_details["proxy_password"],
+            )
 
         # Close and thus delete the temporary file
         TempFileManager.delete_temp_file(secrets_file)
@@ -202,28 +227,60 @@ class ApiFactory(unittest.TestCase):
 
     def test_get_api_with_correlation_id_from_env_var(self):
 
-        env_vars = {config_keys[key]["env"]: value for key, value in source_config_details.items() if value is not None}
+        env_vars = {
+            config_keys[key]["env"]: value
+            for key, value in source_config_details.items()
+            if value is not None
+        }
         env_vars["FBN_CORRELATION_ID"] = "env-correlation-id"
 
-        with patch.dict('os.environ', env_vars, clear=True):
+        with patch.dict("os.environ", env_vars, clear=True):
             factory = ApiClientFactory()
             api = factory.build(InstrumentsApi)
             self.assertIsInstance(api, InstrumentsApi)
             self.validate_api(api)
-            self.assertTrue("CorrelationId" in api.api_client.default_headers, msg="CorrelationId not found in headers")
-            self.assertEquals(api.api_client.default_headers["CorrelationId"], "env-correlation-id")
+            self.assertTrue(
+                "CorrelationId" in api.api_client.default_headers,
+                msg="CorrelationId not found in headers",
+            )
+            self.assertEquals(
+                api.api_client.default_headers["CorrelationId"], "env-correlation-id"
+            )
 
     def test_get_api_with_correlation_id_from_param(self):
 
-        env_vars = {config_keys[key]["env"]: value for key, value in source_config_details.items() if value is not None}
+        env_vars = {
+            config_keys[key]["env"]: value
+            for key, value in source_config_details.items()
+            if value is not None
+        }
 
-        with patch.dict('os.environ', env_vars, clear=True):
+        with patch.dict("os.environ", env_vars, clear=True):
             factory = ApiClientFactory(
                 api_secrets_filename=CredentialsSource.secrets_path(),
-                correlation_id="param-correlation-id"
+                correlation_id="param-correlation-id",
             )
             api = factory.build(InstrumentsApi)
             self.assertIsInstance(api, InstrumentsApi)
             self.validate_api(api)
-            self.assertTrue("CorrelationId" in api.api_client.default_headers, msg="CorrelationId not found in headers")
-            self.assertEquals(api.api_client.default_headers["CorrelationId"], "param-correlation-id")
+            self.assertTrue(
+                "CorrelationId" in api.api_client.default_headers,
+                msg="CorrelationId not found in headers",
+            )
+            self.assertEquals(
+                api.api_client.default_headers["CorrelationId"], "param-correlation-id"
+            )
+
+    def test_get_api_token_as_env_var(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "FBN_LUSID_API_URL": source_config_details["api_url"],
+                "FBN_API_TOKEN": source_config_details["api_token"],
+            },
+            clear=True,
+        ):
+            factory = ApiClientFactory()
+        api = factory.build(InstrumentsApi)
+        self.assertIsInstance(api, InstrumentsApi)
+        self.validate_api(api)
