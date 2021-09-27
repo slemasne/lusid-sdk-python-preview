@@ -559,7 +559,3 @@ from lusid.models.weighted_instrument import WeightedInstrument
 from lusid.models.weighted_instruments import WeightedInstruments
 from lusid.models.yield_curve_data import YieldCurveData
 from lusid.models.yield_curve_data_all_of import YieldCurveDataAllOf
-
-# import utilities into sdk package
-from lusid.utilities.api_client_factory import ApiClientFactory
-sdk/lusid/utilities/api_client_factory.py
