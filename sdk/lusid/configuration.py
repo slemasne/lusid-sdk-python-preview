@@ -466,3 +466,8 @@ class Configuration(object):
     def pool_manager_fn(self):
         """Return pool manager function."""
         return self.pool_manager_fn
+
+    @pool_manager_fn.setter
+    def pool_manager_fn(self, value):
+        """Set pool manager function"""
+        self.pool_manager_fn = value
